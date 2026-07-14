@@ -1,7 +1,7 @@
 {
 	"name": "@router-for-me/pi-cliproxyapi-provider",
 	"version": "1.0.0",
-	"description": "Pi provider extension that auto-registers CLIProxyAPI models via /v1/models?client_version=pi",
+	"description": "Pi provider extension that auto-registers CLIProxyAPI models",
 	"type": "module",
 	"keywords": [
 		"pi-package",

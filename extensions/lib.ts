@@ -385,6 +385,25 @@ export function toPiModel(model: CodexClientModel): PiProviderModel | null {
 	};
 }
 
+/** HTTP error from /v1/models (used to detect 401 and re-show setup commands). */
+export class ModelsHttpError extends Error {
+	readonly status: number;
+	readonly statusText: string;
+
+	constructor(status: number, statusText: string, body: string) {
+		super(
+			`models request failed: ${status} ${statusText}${body ? ` body=${body.slice(0, 200)}` : ""}`,
+		);
+		this.name = "ModelsHttpError";
+		this.status = status;
+		this.statusText = statusText;
+	}
+}
+
+export function isUnauthorizedModelsError(error: unknown): boolean {
+	return error instanceof ModelsHttpError && error.status === 401;
+}
+
 export async function fetchCodexModels(
 	modelsUrl: string,
 	apiKey: string,
@@ -396,21 +415,33 @@ export async function fetchCodexModels(
 		},
 	});
 
+	// Login validation only requires HTTP 200; non-2xx means credentials/baseUrl failed.
 	if (!response.ok) {
 		const body = await response.text().catch(() => "");
-		throw new Error(
-			`models request failed: ${response.status} ${response.statusText}${body ? ` body=${body.slice(0, 200)}` : ""}`,
-		);
+		throw new ModelsHttpError(response.status, response.statusText, body);
 	}
 
-	const payload = (await response.json()) as CodexClientModelsResponse;
-	if (Array.isArray(payload.models)) {
-		return payload.models;
+	// Status 200 is enough for success, even when the catalog is empty or non-JSON.
+	let payload: unknown;
+	try {
+		payload = await response.json();
+	} catch {
+		return [];
 	}
-	if (Array.isArray(payload.data)) {
-		return payload.data;
+
+	if (Array.isArray(payload)) {
+		return payload as CodexClientModel[];
 	}
-	throw new Error("models response missing models/data array");
+	if (payload && typeof payload === "object") {
+		const obj = payload as CodexClientModelsResponse;
+		if (Array.isArray(obj.models)) {
+			return obj.models;
+		}
+		if (Array.isArray(obj.data)) {
+			return obj.data;
+		}
+	}
+	return [];
 }
 
 export async function loadMappedModels(
@@ -423,10 +454,7 @@ export async function loadMappedModels(
 		.map(toPiModel)
 		.filter((model): model is PiProviderModel => model !== null);
 
-	if (models.length === 0) {
-		throw new Error(`no usable models from ${endpoints.modelsUrl}`);
-	}
-
+	// Empty catalog is valid: credentials passed (HTTP 200), just no usable models yet.
 	return {
 		models,
 		inferenceBaseUrl: endpoints.inferenceBaseUrl,

@@ -23,7 +23,7 @@ pi -e /absolute/path/to/pi-cliproxyapi-provider
 
 This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the OAuth/subscription path, so CLIProxyAPI appears under **Use a subscription** (not API key).
 
-### Preferred: dedicated command
+### Preferred: dedicated command (when not yet authenticated)
 
 ```text
 /cliproxyapi
@@ -34,6 +34,13 @@ or short alias:
 ```text
 /cpa
 ```
+
+These slash commands appear only when setup is needed. After a successful login they are **hidden** from the `/` menu. They reappear when:
+
+- you run `/logout` and remove CLIProxyAPI credentials
+- a models request returns **HTTP 401**
+
+To reconfigure while still authenticated, use `/login CLIProxyAPI`.
 
 ### Or use /login shortcuts (skip the menu)
 
@@ -62,9 +69,14 @@ Then choose:
    - base URL — preferred form is host:port, e.g. `http://127.0.0.1:8317`
    - API key
 
+Final login validation calls `{root}/v1/models?client_version=pi`:
+
+- **HTTP 200** → login succeeds (empty model list is still OK)
+- **non-200 / network error** → login fails and you are prompted to re-enter base URL + API key
+
 On success (any of the paths above):
 
-- models are registered immediately in the current session
+- models are registered immediately in the current session (0 models is allowed)
 - credentials are stored in `~/.pi/agent/auth.json`
 - `baseUrl` / `apiKey` are also written to `~/.pi/agent/cliproxyapi.json`
 
@@ -148,6 +160,12 @@ If you previously maintained a static provider such as `cpa-responses` in `~/.pi
 
 ## Failure behavior
 
-- Before setup / without credentials: provider still appears in `/login` and `/cliproxyapi` is available, but no models are listed yet.
-- If CPA is unreachable during startup: a warning is logged, provider stays available for reconfiguration via `/cliproxyapi` or `/login`.
-- If setup validation fails (bad baseUrl/key/network): setup fails and nothing is persisted.
+- Before setup / without credentials: provider still appears in `/login`; `/cliproxyapi` and `/cpa` are shown; no models are listed yet.
+- After successful login: `/cliproxyapi` and `/cpa` are hidden; reconfigure via `/login CLIProxyAPI` if needed.
+- After `/logout` for CLIProxyAPI: setup commands reappear for reconfiguration.
+- If a models request returns **HTTP 401**: setup commands reappear for reconfiguration.
+- If CPA is unreachable during startup (non-401): a warning is logged; setup commands stay available via `/cliproxyapi` or `/login`.
+- Login/setup final step validates credentials by requesting models:
+  - HTTP 200 (including empty catalog) → credentials are persisted; setup commands hidden
+  - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key
+- If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run setup later after models become available.

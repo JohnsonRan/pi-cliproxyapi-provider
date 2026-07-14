@@ -1,6 +1,6 @@
 {
-  "baseUrl": "http://127.0.0.1:8317",
-  "apiKey": "12345",
-  "providerId": "cliproxyapi",
-  "providerName": "CLIProxyAPI"
+	"baseUrl": "http://127.0.0.1:8317",
+	"apiKey": "12345",
+	"providerId": "cliproxyapi",
+	"providerName": "CLIProxyAPI"
 }

@@ -1,27 +1,53 @@
 {
-  "name": "pi-cliproxyapi-provider",
-  "version": "1.0.0",
-  "description": "Pi provider extension that auto-registers CLIProxyAPI models via /v1/models?client_version=pi",
-  "type": "module",
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "cliproxyapi",
-    "openai-codex-responses"
-  ],
-  "license": "MIT",
-  "pi": {
-    "extensions": [
-      "./extensions/index.ts"
-    ]
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "files": [
-    "extensions",
-    "README.md",
-    "LICENSE"
-  ]
+	"name": "pi-cliproxyapi-provider",
+	"version": "1.0.0",
+	"description": "Pi provider extension that auto-registers CLIProxyAPI models via /v1/models?client_version=pi",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"cliproxyapi",
+		"openai-codex-responses"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/router-for-me/pi-cliproxyapi-provider.git"
+	},
+	"homepage": "https://github.com/router-for-me/pi-cliproxyapi-provider#readme",
+	"bugs": {
+		"url": "https://github.com/router-for-me/pi-cliproxyapi-provider/issues"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"test": "vitest run",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check .",
+		"format": "biome check --write .",
+		"check": "npm run typecheck && npm run lint && npm run test"
+	},
+	"pi": {
+		"extensions": [
+			"./extensions/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.3",
+		"@earendil-works/pi-ai": "^0.80.6",
+		"@earendil-works/pi-coding-agent": "0.80.6",
+		"@types/node": "^22.15.21",
+		"typescript": "6.0.3",
+		"vitest": "4.1.9"
+	},
+	"files": [
+		"extensions",
+		"README.md",
+		"LICENSE"
+	]
 }

@@ -17,13 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type {
-	Api,
-	AssistantMessageEventStream,
-	Context,
-	Model,
-	SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
+import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
 
@@ -78,9 +72,7 @@ function patchCodexSource(source: string, providerIds: string[]): string {
 		`if (accountId) {\n        headers.set("chatgpt-account-id", accountId);\n    }`,
 	);
 
-	const providersMatch = src.match(
-		/const CODEX_TOOL_CALL_PROVIDERS = new Set\(\[([^\]]*)\]\);/,
-	);
+	const providersMatch = src.match(/const CODEX_TOOL_CALL_PROVIDERS = new Set\(\[([^\]]*)\]\);/);
 	if (!providersMatch) {
 		throw new Error("openai-codex-responses source no longer defines CODEX_TOOL_CALL_PROVIDERS");
 	}
@@ -95,10 +87,7 @@ function patchCodexSource(source: string, providerIds: string[]): string {
 	);
 
 	// Keep assistant message api metadata aligned with the registered custom api id.
-	src = src.replaceAll(
-		`api: "openai-codex-responses"`,
-		`api: ${JSON.stringify(CLIPROXYAPI_CODEX_API)}`,
-	);
+	src = src.replaceAll(`api: "openai-codex-responses"`, `api: ${JSON.stringify(CLIPROXYAPI_CODEX_API)}`);
 
 	return src;
 }
@@ -131,14 +120,10 @@ function resolveOriginalCodexModulePath(): { path: string; dir: string } {
 		}
 	}
 
-	throw new Error(
-		`Cannot resolve openai-codex-responses.js (tried: ${candidates.join(", ") || "none"})`,
-	);
+	throw new Error(`Cannot resolve openai-codex-responses.js (tried: ${candidates.join(", ") || "none"})`);
 }
 
-export async function loadCliproxyCodexStreams(
-	providerIds: string[] = ["cliproxyapi"],
-): Promise<CliproxyCodexStreams> {
+export async function loadCliproxyCodexStreams(providerIds: string[] = ["cliproxyapi"]): Promise<CliproxyCodexStreams> {
 	const { path: originalPath, dir: originalDir } = resolveOriginalCodexModulePath();
 	const originalSource = readFileSync(originalPath, "utf8");
 	const patched = rewriteRelativeImports(patchCodexSource(originalSource, providerIds), originalDir);

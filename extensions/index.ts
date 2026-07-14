@@ -18,25 +18,13 @@
  * Non-interactive setup still works via env vars or ~/.pi/agent/cliproxyapi.json.
  */
 
-import type {
-	OAuthCredentials,
-	OAuthLoginCallbacks,
-} from "@earendil-works/pi-ai";
-import {
-	getAgentDir,
-	type ExtensionAPI,
-	type ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
-import {
-	CLIPROXYAPI_CODEX_API,
-	type CliproxyCodexStreamSimple,
-	loadCliproxyCodexStreams,
-} from "./codex-stream.ts";
+import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CLIPROXYAPI_CODEX_API, type CliproxyCodexStreamSimple, loadCliproxyCodexStreams } from "./codex-stream.ts";
 import {
 	CONFIG_FILE_NAME,
 	CREDENTIAL_TTL_MS,
 	DEFAULT_BASE_URL,
-	type PiProviderModel,
 	decodeRefreshMeta,
 	encodeRefreshMeta,
 	firstNonEmpty,
@@ -44,6 +32,7 @@ import {
 	loadAuthConnection,
 	loadConfigFile,
 	loadMappedModels,
+	type PiProviderModel,
 	resolveConnection,
 	resolveEndpoints,
 	resolveIdentity,
@@ -92,21 +81,14 @@ function resolveDefaultBaseUrl(agentDir: string, providerId: string): string {
 		logWarn(`failed to read auth.json: ${err.message}`);
 	}
 
-	return firstNonEmpty(
-		process.env.CLIPROXYAPI_BASE_URL,
-		fileBaseUrl,
-		authBaseUrl,
-		DEFAULT_BASE_URL,
-	)!;
+	return firstNonEmpty(process.env.CLIPROXYAPI_BASE_URL, fileBaseUrl, authBaseUrl, DEFAULT_BASE_URL)!;
 }
 
 async function promptConnection(
 	callbacks: OAuthLoginCallbacks,
 	defaults: { baseUrl: string },
 ): Promise<{ baseUrlInput: string; apiKey: string }> {
-	callbacks.onProgress?.(
-		"Configure CLIProxyAPI. Preferred baseUrl form: host:port (e.g. http://127.0.0.1:8317).",
-	);
+	callbacks.onProgress?.("Configure CLIProxyAPI. Preferred baseUrl form: host:port (e.g. http://127.0.0.1:8317).");
 
 	const baseUrlRaw = await callbacks.onPrompt({
 		message: `CLIProxyAPI base URL [${defaults.baseUrl}]:`,
@@ -144,17 +126,8 @@ async function configureAndRegister(options: {
 	streamSimple: CliproxyCodexStreamSimple;
 	setupCommands: SetupCommandsController;
 }): Promise<{ modelCount: number; modelsUrl: string }> {
-	const {
-		pi,
-		agentDir,
-		providerId,
-		providerName,
-		baseUrlInput,
-		apiKey,
-		defaultBaseUrl,
-		streamSimple,
-		setupCommands,
-	} = options;
+	const { pi, agentDir, providerId, providerName, baseUrlInput, apiKey, defaultBaseUrl, streamSimple, setupCommands } =
+		options;
 
 	const loaded = await loadMappedModels(baseUrlInput, apiKey);
 
@@ -192,8 +165,7 @@ function createOAuthHandlers(options: {
 	streamSimple: CliproxyCodexStreamSimple;
 	setupCommands: SetupCommandsController;
 }) {
-	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, setupCommands } =
-		options;
+	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, setupCommands } = options;
 
 	return {
 		name: providerName,
@@ -222,9 +194,7 @@ function createOAuthHandlers(options: {
 						setupCommands,
 					});
 
-					logInfo(
-						`login ok: registered ${result.modelCount} models from ${result.modelsUrl}`,
-					);
+					logInfo(`login ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
 					return buildOAuthCredentials(baseUrlInput, apiKey);
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
@@ -233,9 +203,7 @@ function createOAuthHandlers(options: {
 					if (isUnauthorizedModelsError(error)) {
 						setupCommands.show();
 					}
-					callbacks.onProgress?.(
-						`Login validation failed: ${message}\nPlease re-enter base URL and API key.`,
-					);
+					callbacks.onProgress?.(`Login validation failed: ${message}\nPlease re-enter base URL and API key.`);
 					// Keep last baseUrl as the next default so retyping is easier.
 					promptDefaultBaseUrl = baseUrlInput || promptDefaultBaseUrl;
 				}
@@ -254,7 +222,7 @@ function createOAuthHandlers(options: {
 			return credentials.access;
 		},
 
-		modifyModels(models, credentials) {
+		modifyModels(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[] {
 			const meta = decodeRefreshMeta(credentials.refresh);
 			if (!meta?.baseUrl) {
 				return models;
@@ -262,9 +230,7 @@ function createOAuthHandlers(options: {
 			try {
 				const { inferenceBaseUrl } = resolveEndpoints(meta.baseUrl);
 				return models.map((model) =>
-					model.provider === providerId
-						? { ...model, baseUrl: inferenceBaseUrl }
-						: model,
+					model.provider === providerId ? { ...model, baseUrl: inferenceBaseUrl } : model,
 				);
 			} catch {
 				return models;
@@ -395,10 +361,7 @@ function createSetupCommandsController(options: {
 
 		const promptDefaultBaseUrl = resolveDefaultBaseUrl(agentDir, providerId) || defaultBaseUrl;
 
-		const baseUrlRaw = await ctx.ui.input(
-			`CLIProxyAPI base URL [${promptDefaultBaseUrl}]:`,
-			promptDefaultBaseUrl,
-		);
+		const baseUrlRaw = await ctx.ui.input(`CLIProxyAPI base URL [${promptDefaultBaseUrl}]:`, promptDefaultBaseUrl);
 		if (baseUrlRaw === undefined) {
 			ctx.ui.notify("CLIProxyAPI setup cancelled.", "info");
 			return;
@@ -448,13 +411,8 @@ function createSetupCommandsController(options: {
 					...buildOAuthCredentials(currentBaseUrl, currentApiKey),
 				});
 
-				logInfo(
-					`command setup ok: registered ${result.modelCount} models from ${result.modelsUrl}`,
-				);
-				ctx.ui.notify(
-					`CLIProxyAPI configured: ${result.modelCount} models from ${result.modelsUrl}`,
-					"info",
-				);
+				logInfo(`command setup ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
+				ctx.ui.notify(`CLIProxyAPI configured: ${result.modelCount} models from ${result.modelsUrl}`, "info");
 				return;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -462,18 +420,12 @@ function createSetupCommandsController(options: {
 				if (isUnauthorizedModelsError(error)) {
 					setupCommands.show();
 				}
-				ctx.ui.notify(
-					`CLIProxyAPI validation failed: ${message}. Please re-enter base URL and API key.`,
-					"error",
-				);
+				ctx.ui.notify(`CLIProxyAPI validation failed: ${message}. Please re-enter base URL and API key.`, "error");
 			}
 
 			// Collect replacement credentials before retrying validation.
 			while (true) {
-				const retryBaseUrlRaw = await ctx.ui.input(
-					`CLIProxyAPI base URL [${currentBaseUrl}]:`,
-					currentBaseUrl,
-				);
+				const retryBaseUrlRaw = await ctx.ui.input(`CLIProxyAPI base URL [${currentBaseUrl}]:`, currentBaseUrl);
 				if (retryBaseUrlRaw === undefined) {
 					ctx.ui.notify("CLIProxyAPI setup cancelled.", "info");
 					return;
@@ -505,18 +457,16 @@ function createSetupCommandsController(options: {
 		}
 	};
 
-	const commandSpecs: Array<{ name: (typeof SETUP_COMMAND_NAMES)[number]; description: string }> =
-		[
-			{
-				name: "cliproxyapi",
-				description:
-					"Configure CLIProxyAPI (baseUrl + API key) and load models. Prefer this or /login CLIProxyAPI.",
-			},
-			{
-				name: "cpa",
-				description: "Alias for /cliproxyapi — configure CLIProxyAPI and load models.",
-			},
-		];
+	const commandSpecs: Array<{ name: (typeof SETUP_COMMAND_NAMES)[number]; description: string }> = [
+		{
+			name: "cliproxyapi",
+			description: "Configure CLIProxyAPI (baseUrl + API key) and load models. Prefer this or /login CLIProxyAPI.",
+		},
+		{
+			name: "cpa",
+			description: "Alias for /cliproxyapi — configure CLIProxyAPI and load models.",
+		},
+	];
 
 	const registerAll = (): void => {
 		for (const spec of commandSpecs) {
@@ -535,11 +485,7 @@ function createSetupCommandsController(options: {
 		if (!commandMap) {
 			// Capture the extension.commands Map during first registration.
 			const originalSet = Map.prototype.set;
-			Map.prototype.set = function setWithCapture(
-				this: Map<unknown, unknown>,
-				key: unknown,
-				value: unknown,
-			) {
+			Map.prototype.set = function setWithCapture(this: Map<unknown, unknown>, key: unknown, value: unknown) {
 				if (
 					key === "cliproxyapi" &&
 					value &&
@@ -556,9 +502,7 @@ function createSetupCommandsController(options: {
 				Map.prototype.set = originalSet;
 			}
 			if (!commandMap) {
-				logWarn(
-					"could not capture command map; /cliproxyapi and /cpa cannot be hidden after login",
-				);
+				logWarn("could not capture command map; /cliproxyapi and /cpa cannot be hidden after login");
 			}
 		} else {
 			registerAll();
@@ -621,9 +565,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	pi.on("session_start", (_event, ctx) => {
 		watchProviderLogout(ctx.modelRegistry.authStorage, identity.providerId, () => {
 			setupCommands.show();
-			logInfo(
-				`logout detected for ${identity.providerId}: setup commands restored: /cliproxyapi, /cpa`,
-			);
+			logInfo(`logout detected for ${identity.providerId}: setup commands restored: /cliproxyapi, /cpa`);
 		});
 	});
 
@@ -670,9 +612,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		if (isUnauthorizedModelsError(error)) {
 			// 401 → credentials rejected; re-show setup commands for reconfiguration.
 			setupCommands.show();
-			logWarn(
-				`models request unauthorized (${message}). Setup commands restored: /cliproxyapi, /cpa.`,
-			);
+			logWarn(`models request unauthorized (${message}). Setup commands restored: /cliproxyapi, /cpa.`);
 		} else {
 			// Other failures (network, etc.): still offer setup so the user can fix baseUrl/key.
 			setupCommands.show();

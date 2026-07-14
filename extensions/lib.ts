@@ -7,10 +7,7 @@ import { dirname, join } from "node:path";
 
 // Local shape matching pi ThinkingLevelMap; avoid hard runtime peer imports here.
 export type ThinkingLevelMap = Partial<
-	Record<
-		"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra",
-		string | null
-	>
+	Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra", string | null>
 >;
 
 export const DEFAULT_PROVIDER_ID = "cliproxyapi";
@@ -27,16 +24,7 @@ export const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as
 export const DEFAULT_MAX_TOKENS = 16384;
 export const DEFAULT_CONTEXT_WINDOW = 128000;
 
-const PI_THINKING_LEVELS = [
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-	"ultra",
-] as const;
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
 export interface CliproxyConfigFile {
 	baseUrl?: string;
@@ -203,10 +191,7 @@ export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): vo
 	writeFileSync(configPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
-export function loadAuthConnection(
-	agentDir: string,
-	providerId: string,
-): { baseUrl?: string; apiKey?: string } | null {
+export function loadAuthConnection(agentDir: string, providerId: string): { baseUrl?: string; apiKey?: string } | null {
 	const authPath = join(agentDir, AUTH_FILE_NAME);
 	try {
 		const raw = readFileSync(authPath, "utf8");
@@ -245,16 +230,8 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
 	}
 
 	return {
-		providerId: firstNonEmpty(
-			process.env.CLIPROXYAPI_PROVIDER_ID,
-			file.providerId,
-			DEFAULT_PROVIDER_ID,
-		)!,
-		providerName: firstNonEmpty(
-			process.env.CLIPROXYAPI_PROVIDER_NAME,
-			file.providerName,
-			DEFAULT_PROVIDER_NAME,
-		)!,
+		providerId: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_ID, file.providerId, DEFAULT_PROVIDER_ID)!,
+		providerName: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_NAME, file.providerName, DEFAULT_PROVIDER_NAME)!,
 	};
 }
 
@@ -262,10 +239,7 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
  * Resolve connection settings.
  * Priority: env > cliproxyapi.json > auth.json (/login) > default baseUrl
  */
-export function resolveConnection(
-	agentDir: string,
-	providerId: string,
-): ResolvedConnection | null {
+export function resolveConnection(agentDir: string, providerId: string): ResolvedConnection | null {
 	let file: CliproxyConfigFile = {};
 	try {
 		file = loadConfigFile(agentDir);
@@ -280,12 +254,7 @@ export function resolveConnection(
 		auth = null;
 	}
 
-	const baseUrlInput = firstNonEmpty(
-		process.env.CLIPROXYAPI_BASE_URL,
-		file.baseUrl,
-		auth?.baseUrl,
-		DEFAULT_BASE_URL,
-	)!;
+	const baseUrlInput = firstNonEmpty(process.env.CLIPROXYAPI_BASE_URL, file.baseUrl, auth?.baseUrl, DEFAULT_BASE_URL)!;
 	const apiKey = firstNonEmpty(process.env.CLIPROXYAPI_API_KEY, file.apiKey, auth?.apiKey);
 	if (!apiKey) {
 		return null;
@@ -304,12 +273,7 @@ export function extractReasoningEfforts(model: CodexClientModel): string[] {
 	const raw = model.supported_reasoning_levels ?? [];
 	const efforts: string[] = [];
 	for (const entry of raw) {
-		const effort =
-			typeof entry === "string"
-				? entry
-				: typeof entry?.effort === "string"
-					? entry.effort
-					: "";
+		const effort = typeof entry === "string" ? entry : typeof entry?.effort === "string" ? entry.effort : "";
 		const normalized = effort.trim().toLowerCase();
 		if (!normalized) continue;
 		if (!efforts.includes(normalized)) {
@@ -365,9 +329,7 @@ export function toPiModel(model: CodexClientModel): PiProviderModel | null {
 	const efforts = extractReasoningEfforts(model);
 	const hasReasoning = efforts.some((effort) => effort !== "none");
 	const contextWindow =
-		(typeof model.context_window === "number" && model.context_window > 0
-			? model.context_window
-			: undefined) ??
+		(typeof model.context_window === "number" && model.context_window > 0 ? model.context_window : undefined) ??
 		(typeof model.max_context_window === "number" && model.max_context_window > 0
 			? model.max_context_window
 			: undefined) ??
@@ -391,9 +353,7 @@ export class ModelsHttpError extends Error {
 	readonly statusText: string;
 
 	constructor(status: number, statusText: string, body: string) {
-		super(
-			`models request failed: ${status} ${statusText}${body ? ` body=${body.slice(0, 200)}` : ""}`,
-		);
+		super(`models request failed: ${status} ${statusText}${body ? ` body=${body.slice(0, 200)}` : ""}`);
 		this.name = "ModelsHttpError";
 		this.status = status;
 		this.statusText = statusText;
@@ -404,10 +364,7 @@ export function isUnauthorizedModelsError(error: unknown): boolean {
 	return error instanceof ModelsHttpError && error.status === 401;
 }
 
-export async function fetchCodexModels(
-	modelsUrl: string,
-	apiKey: string,
-): Promise<CodexClientModel[]> {
+export async function fetchCodexModels(modelsUrl: string, apiKey: string): Promise<CodexClientModel[]> {
 	const response = await fetch(modelsUrl, {
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
@@ -450,9 +407,7 @@ export async function loadMappedModels(
 ): Promise<{ models: PiProviderModel[]; inferenceBaseUrl: string; modelsUrl: string }> {
 	const endpoints = resolveEndpoints(baseUrlInput);
 	const remoteModels = await fetchCodexModels(endpoints.modelsUrl, apiKey);
-	const models = remoteModels
-		.map(toPiModel)
-		.filter((model): model is PiProviderModel => model !== null);
+	const models = remoteModels.map(toPiModel).filter((model): model is PiProviderModel => model !== null);
 
 	// Empty catalog is valid: credentials passed (HTTP 200), just no usable models yet.
 	return {

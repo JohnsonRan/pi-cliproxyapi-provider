@@ -544,7 +544,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	try {
 		const streams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"]);
 		streamSimple = streams.streamSimple;
-		logInfo(`using patched protocol api=${streams.api}`);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		logWarn(`failed to load patched codex protocol: ${message}`);
@@ -606,7 +605,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		});
 		// Already authenticated — keep /cliproxyapi and /cpa hidden.
 		setupCommands.hide();
-		logInfo(`loaded ${loaded.models.length} models from ${loaded.modelsUrl}`);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (isUnauthorizedModelsError(error)) {

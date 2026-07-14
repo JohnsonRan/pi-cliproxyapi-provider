@@ -1,6 +1,6 @@
 {
   "name": "pi-cliproxyapi-provider",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Pi provider extension that auto-registers CLIProxyAPI models via /v1/models?client_version=pi",
   "type": "module",
   "keywords": [

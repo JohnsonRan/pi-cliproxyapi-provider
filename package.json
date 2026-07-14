@@ -1,0 +1,26 @@
+{
+  "name": "pi-cliproxyapi-provider",
+  "version": "0.1.0",
+  "description": "Pi provider extension that auto-registers CLIProxyAPI models via /v1/models?client_version=pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "cliproxyapi",
+    "openai-codex-responses"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "files": [
+    "extensions",
+    "README.md"
+  ]
+}

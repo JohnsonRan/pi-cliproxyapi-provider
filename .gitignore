@@ -7,3 +7,7 @@ test-output
 *.tgz
 .idea/
 .serena/
+
+# Local publish helper (not committed)
+Makefile
+.publish.mjs

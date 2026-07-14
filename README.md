@@ -1,14 +1,15 @@
 # pi-cliproxyapi-provider
 
-Pi provider extension that discovers models from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and registers them for use with the `openai-codex-responses` API.
+Pi provider extension that discovers models from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and registers them for use in pi. It also ships a small TUI helper that shows elapsed runtime and a TPS summary after each agent turn.
 
 ## What it does
 
 1. Registers a provider that always appears in `/login` (subscription path) and via `/cliproxyapi` / `/cpa`.
 2. Interactive setup collects `baseUrl` + `apiKey`.
 3. Fetches `{root}/v1/models?client_version=pi`.
-4. Maps the Codex client catalog into pi models.
-5. Registers inference against `{root}/backend-api/` using a **patched** Codex Responses protocol (`cliproxyapi-codex-responses`).
+4. Maps the CLIProxyAPI catalog into pi models.
+5. Registers inference against `{root}/backend-api/`.
+6. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 
 ## Install
 
@@ -137,11 +138,11 @@ Preferred form is **host:port only**:
 | `http://127.0.0.1:8317/v1` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 | `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 
-pi then calls `{inference}/codex/responses` via this package's patched Codex Responses stream implementation.
+pi then sends inference traffic to `{inference}/codex/responses`.
 
 ## Model mapping
 
-From CPA Codex catalog entry → pi model:
+From CPA catalog entry → pi model:
 
 | CPA field | Pi field |
 |-----------|----------|
@@ -161,6 +162,16 @@ If you previously maintained a static provider such as `cpa-responses` in `~/.pi
 1. Install this package and run `/cliproxyapi` or `/login CLIProxyAPI` (or set `cliproxyapi.json`).
 2. Point `defaultProvider` / `enabledModels` at `cliproxyapi/<model-id>` (or set `providerId` to `cpa-responses` for a drop-in id).
 3. Remove the hand-maintained models array once the dynamic list looks correct.
+
+## Elapsed time and TPS (TUI)
+
+The package also registers `extensions/tps.ts`, which only activates for the primary interactive TUI session (`ctx.hasUI && ctx.mode === "tui"`):
+
+- While the agent is running, the footer shows `Elapsed …` (updates every second).
+- When the agent settles, the footer keeps the final elapsed time and a notification reports approximate TPS plus token usage (`out` / `in` / cache r/w / total).
+- Subagent and print-mode sessions do not own the timer, clear the parent footer, or emit TPS toasts.
+
+Disable just this helper via `pi config` if you only want the CLIProxyAPI provider.
 
 ## Failure behavior
 

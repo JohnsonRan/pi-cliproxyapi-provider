@@ -13,6 +13,10 @@ Pi provider extension that discovers models from [CLIProxyAPI](https://github.co
 ## Install
 
 ```bash
+# from npm
+pi install npm:@router-for-me/pi-cliproxyapi-provider
+
+# from a local checkout
 pi install /absolute/path/to/pi-cliproxyapi-provider
 
 # or temporarily for one run

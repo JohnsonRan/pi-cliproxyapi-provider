@@ -1,5 +1,5 @@
 {
-	"name": "pi-cliproxyapi-provider",
+	"name": "@router-for-me/pi-cliproxyapi-provider",
 	"version": "1.0.0",
 	"description": "Pi provider extension that auto-registers CLIProxyAPI models via /v1/models?client_version=pi",
 	"type": "module",
@@ -17,6 +17,9 @@
 	"homepage": "https://github.com/router-for-me/pi-cliproxyapi-provider#readme",
 	"bugs": {
 		"url": "https://github.com/router-for-me/pi-cliproxyapi-provider/issues"
+	},
+	"publishConfig": {
+		"access": "public"
 	},
 	"engines": {
 		"node": ">=20"

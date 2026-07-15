@@ -370,20 +370,7 @@ export function codexModelId(model: CodexClientModel): string {
 }
 
 export function supportsFastServiceTier(model: CodexClientModel): boolean {
-	const serviceTiers = Array.isArray(model.service_tiers) ? model.service_tiers : [];
-	for (const tier of serviceTiers) {
-		const id =
-			typeof tier === "string"
-				? tier
-				: tier && typeof tier === "object" && typeof tier.id === "string"
-					? tier.id
-					: undefined;
-		if (id?.trim().toLowerCase() === "priority") {
-			return true;
-		}
-	}
-	const speedTiers = Array.isArray(model.additional_speed_tiers) ? model.additional_speed_tiers : [];
-	return speedTiers.some((tier) => typeof tier === "string" && tier.trim().toLowerCase() === "fast");
+	return Array.isArray(model.service_tiers) && model.service_tiers.length > 0;
 }
 
 export function toPiModel(model: CodexClientModel): PiProviderModel | null {

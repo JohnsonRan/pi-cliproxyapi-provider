@@ -11,7 +11,7 @@
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
  * 5. On success, models/credentials are saved and `/cliproxyapi` `/cpa` are hidden.
  * 6. Setup commands reappear after `/logout` or when a models request returns HTTP 401.
- * 7. `/cpa-fast` controls catalog-driven priority service tier injection per session.
+ * 7. `/fast` controls catalog-driven priority service tier injection per session.
  *
  * Uses a patched openai-codex-responses implementation that does not require
  * extracting chatgpt_account_id from the API key (plain CPA keys work).
@@ -20,9 +20,15 @@
  */
 
 import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+	getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import { CLIPROXYAPI_CODEX_API, type CliproxyCodexStreamSimple, loadCliproxyCodexStreams } from "./codex-stream.ts";
 import { FAST_MODE_ENTRY_TYPE, FastModeController, restoreFastModeFromEntries } from "./fast.ts";
+import { FastFooterController } from "./fast-footer.ts";
 import {
 	CONFIG_FILE_NAME,
 	CREDENTIAL_TTL_MS,
@@ -555,63 +561,39 @@ function createSetupCommandsController(options: {
 	return setupCommands;
 }
 
-function registerFastCommand(options: {
+export function registerFastCommand(options: {
 	pi: ExtensionAPI;
 	providerId: string;
-	providerName: string;
 	fastMode: FastModeController;
+	onStatusChange?: (ctx: ExtensionContext) => void;
 }): void {
-	const { pi, providerId, providerName, fastMode } = options;
-	const actions = ["on", "off", "status"] as const;
+	const { pi, providerId, fastMode, onStatusChange } = options;
 
 	pi.on("session_start", (_event, ctx) => {
 		restoreFastModeFromEntries(fastMode, ctx.sessionManager.getBranch());
 	});
 	pi.on("session_tree", (_event, ctx) => {
 		restoreFastModeFromEntries(fastMode, ctx.sessionManager.getBranch());
+		onStatusChange?.(ctx);
 	});
 
-	pi.registerCommand("cpa-fast", {
-		description: "Control CLIProxyAPI Fast mode for this session: on, off, or status.",
-		getArgumentCompletions: (prefix) => {
-			const normalizedPrefix = prefix.trim().toLowerCase();
-			const matches = actions.filter((action) => action.startsWith(normalizedPrefix));
-			return matches.length > 0 ? matches.map((action) => ({ value: action, label: action })) : null;
-		},
+	pi.registerCommand("fast", {
+		description: "Toggle CLIProxyAPI Fast mode for this session.",
 		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase() || "status";
-			if (action !== "on" && action !== "off" && action !== "status") {
-				ctx.ui.notify("Usage: /cpa-fast on|off|status", "error");
+			if (args.trim()) {
+				ctx.ui.notify("Usage: /fast", "error");
 				return;
 			}
 
-			if (action === "on" || action === "off") {
-				const enabled = action === "on";
-				fastMode.setSessionEnabled(enabled);
-				pi.appendEntry(FAST_MODE_ENTRY_TYPE, { enabled });
-				logInfo(`Fast session override ${enabled ? "enabled" : "disabled"}`);
-			}
-
-			const enabled = fastMode.isEnabled();
-			const source = fastMode.getSource() === "session-override" ? "session override" : "configured default";
 			const currentModel = ctx.model;
-			let detail: string;
-			let severity: "info" | "warning" = "info";
-
-			if (!currentModel) {
-				detail = "No model is currently selected.";
-			} else if (currentModel.provider !== providerId) {
-				detail = `Current model ${currentModel.provider}/${currentModel.id} is not provided by ${providerName}.`;
-			} else if (!fastMode.isModelSupported(currentModel.id)) {
-				detail = `Current model ${providerId}/${currentModel.id} does not advertise Fast; requests remain unchanged.`;
-				if (enabled) severity = "warning";
-			} else if (enabled) {
-				detail = `Current model ${providerId}/${currentModel.id} will request service_tier=priority.`;
-			} else {
-				detail = `Current model ${providerId}/${currentModel.id} supports Fast; priority injection is off.`;
+			if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
+				ctx.ui.notify("This model does not support Fast mode.", "warning");
+				return;
 			}
 
-			ctx.ui.notify(`${providerName} Fast is ${enabled ? "on" : "off"} (${source}). ${detail}`, severity);
+			const enabled = fastMode.toggleSessionEnabled();
+			pi.appendEntry(FAST_MODE_ENTRY_TYPE, { enabled });
+			onStatusChange?.(ctx);
 		},
 	});
 }
@@ -645,12 +627,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return;
 	}
 
+	const fastFooter = new FastFooterController(identity.providerId, fastMode);
 	registerFastCommand({
 		pi,
 		providerId: identity.providerId,
-		providerName: identity.providerName,
 		fastMode,
+		onStatusChange: (ctx) => fastFooter.refresh(ctx),
 	});
+	fastFooter.register(pi);
 
 	const setupCommands = createSetupCommandsController({
 		pi,

@@ -1,4 +1,5 @@
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyFastPayloadHook,
@@ -7,6 +8,7 @@ import {
 	wrapStreamSimpleForFast,
 } from "../extensions/codex-stream.ts";
 import { FAST_MODE_ENTRY_TYPE, FastModeController, restoreFastModeFromEntries } from "../extensions/fast.ts";
+import { FastFooterController, formatFastModelStatus } from "../extensions/fast-footer.ts";
 import { loadMappedModels } from "../extensions/lib.ts";
 
 const model = {
@@ -47,6 +49,15 @@ describe("FastModeController", () => {
 		expect(mode.isEffectiveFor("gpt-5.4")).toBe(false);
 	});
 
+	it("toggles the effective session preference", () => {
+		const mode = new FastModeController(false);
+
+		expect(mode.toggleSessionEnabled()).toBe(true);
+		expect(mode.isEnabled()).toBe(true);
+		expect(mode.toggleSessionEnabled()).toBe(false);
+		expect(mode.isEnabled()).toBe(false);
+	});
+
 	it("restores the latest Fast override from session entries", () => {
 		const mode = new FastModeController(true);
 		restoreFastModeFromEntries(mode, [
@@ -63,6 +74,96 @@ describe("FastModeController", () => {
 	});
 });
 
+describe("Fast footer model status", () => {
+	it("appends lowercase fast after the reasoning level only while Fast is effective", () => {
+		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", true)).toBe("gpt-5.6-sol • xhigh • fast");
+		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", false)).toBe("gpt-5.6-sol • xhigh");
+	});
+
+	it("refreshes pi's built-in footer without replacing it", () => {
+		const fastMode = new FastModeController(false);
+		fastMode.setSupportedModelIds([model.id]);
+		const setFooter = vi.fn();
+		const setStatus = vi.fn();
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+		} as unknown as ExtensionAPI;
+		const ctx = {
+			mode: "tui",
+			model,
+			ui: { setFooter, setStatus },
+		} as unknown as ExtensionContext;
+		const footer = new FastFooterController(model.provider, fastMode);
+		footer.register(pi);
+
+		handlers.get("session_start")?.({}, ctx);
+		footer.refresh(ctx);
+
+		expect(setFooter).not.toHaveBeenCalled();
+		expect(setStatus).toHaveBeenCalledWith("cliproxyapi-fast-refresh", undefined);
+		handlers.get("session_shutdown")?.({}, ctx);
+	});
+
+	it("patches and restores the built-in footer across session reloads", () => {
+		const originalRender = FooterComponent.prototype.render;
+		const displayModel = { id: model.id, provider: model.provider, reasoning: true };
+		const stubRender = function stubRender(this: FooterComponent, width: number): string[] {
+			const session = (this as unknown as { session: { state: { model: typeof displayModel } } }).session;
+			if (width < 0) throw new Error("render failed");
+			return [`${session.state.model.id}|${session.state.model.reasoning}`];
+		};
+		const fastMode = new FastModeController(false);
+		fastMode.setSupportedModelIds([model.id]);
+		fastMode.toggleSessionEnabled();
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+		} as unknown as ExtensionAPI;
+		const ctx = {
+			mode: "tui",
+			ui: {
+				theme: {
+					fg: (color: string, text: string) => (color === "warning" ? `<yellow>${text}</yellow>` : text),
+				},
+			},
+		} as unknown as ExtensionContext;
+		const footer = new FastFooterController(model.provider, fastMode);
+		const component = Object.create(FooterComponent.prototype) as FooterComponent;
+		Object.defineProperty(component, "session", {
+			value: { state: { model: displayModel, thinkingLevel: "xhigh" } },
+		});
+
+		try {
+			FooterComponent.prototype.render = stubRender;
+			footer.register(pi);
+			handlers.get("session_start")?.({}, ctx);
+
+			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
+			expect(displayModel).toEqual({ id: "gpt-5.4", provider: "cliproxyapi", reasoning: true });
+
+			fastMode.toggleSessionEnabled();
+			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
+			fastMode.toggleSessionEnabled();
+			fastMode.setSupportedModelIds([]);
+			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
+			fastMode.setSupportedModelIds([model.id]);
+
+			expect(() => component.render(-1)).toThrow("render failed");
+			expect(displayModel).toEqual({ id: "gpt-5.4", provider: "cliproxyapi", reasoning: true });
+
+			handlers.get("session_shutdown")?.({}, ctx);
+			expect(FooterComponent.prototype.render).toBe(stubRender);
+
+			handlers.get("session_start")?.({}, ctx);
+			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
+		} finally {
+			handlers.get("session_shutdown")?.({}, ctx);
+			FooterComponent.prototype.render = originalRender;
+		}
+	});
+});
+
 describe("Fast catalog mapping", () => {
 	it("returns the model ids that advertise Fast", async () => {
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -70,7 +171,8 @@ describe("Fast catalog mapping", () => {
 				JSON.stringify({
 					models: [
 						{ slug: "gpt-5.4", service_tiers: [{ id: "priority", name: "Fast" }] },
-						{ slug: "gpt-5.5", additional_speed_tiers: ["fast"] },
+						{ slug: "gpt-5.5", service_tiers: [{ id: "flex" }] },
+						{ slug: "speed-tier-only", additional_speed_tiers: ["fast"] },
 						{ slug: "custom-model", service_tiers: [] },
 					],
 				}),
@@ -81,7 +183,12 @@ describe("Fast catalog mapping", () => {
 		try {
 			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key");
 			expect(loaded.fastModelIds).toEqual(["gpt-5.4", "gpt-5.5"]);
-			expect(loaded.models.map((entry) => entry.id)).toEqual(["gpt-5.4", "gpt-5.5", "custom-model"]);
+			expect(loaded.models.map((entry) => entry.id)).toEqual([
+				"gpt-5.4",
+				"gpt-5.5",
+				"speed-tier-only",
+				"custom-model",
+			]);
 			expect(fetchMock).toHaveBeenCalledWith(
 				"http://127.0.0.1:8317/v1/models?client_version=pi",
 				expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer test-key" }) }),

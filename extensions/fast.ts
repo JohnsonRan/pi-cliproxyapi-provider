@@ -19,6 +19,12 @@ export class FastModeController {
 		this.sessionOverride = enabled;
 	}
 
+	toggleSessionEnabled(): boolean {
+		const enabled = !this.isEnabled();
+		this.setSessionEnabled(enabled);
+		return enabled;
+	}
+
 	clearSessionOverride(): void {
 		this.sessionOverride = undefined;
 	}

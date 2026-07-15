@@ -119,18 +119,18 @@ describe("model mapping helpers", () => {
 		expect(buildInputModalities({})).toEqual(["text"]);
 	});
 
-	it("detects Fast support from the CPA catalog", () => {
+	it("detects Fast support from any non-empty service_tiers array", () => {
 		expect(supportsFastServiceTier({ service_tiers: [{ id: "priority", name: "Fast" }] })).toBe(true);
 		expect(supportsFastServiceTier({ service_tiers: ["PRIORITY"] })).toBe(true);
-		expect(supportsFastServiceTier({ additional_speed_tiers: ["FAST"] })).toBe(true);
-		expect(supportsFastServiceTier({ service_tiers: [], additional_speed_tiers: [] })).toBe(false);
-		expect(supportsFastServiceTier({ service_tiers: [{ id: "flex" }] })).toBe(false);
+		expect(supportsFastServiceTier({ service_tiers: [{ id: "flex" }] })).toBe(true);
+		expect(supportsFastServiceTier({ service_tiers: [null] } as unknown as CodexClientModel)).toBe(true);
+		expect(supportsFastServiceTier({ service_tiers: [] })).toBe(false);
 	});
 
-	it("treats malformed optional Fast metadata as unsupported", () => {
-		expect(supportsFastServiceTier({ service_tiers: [null] } as unknown as CodexClientModel)).toBe(false);
+	it("ignores additional_speed_tiers and malformed service_tiers values", () => {
+		expect(supportsFastServiceTier({ additional_speed_tiers: ["FAST"] })).toBe(false);
+		expect(supportsFastServiceTier({ service_tiers: [], additional_speed_tiers: ["FAST"] })).toBe(false);
 		expect(supportsFastServiceTier({ service_tiers: {} } as unknown as CodexClientModel)).toBe(false);
-		expect(supportsFastServiceTier({ additional_speed_tiers: [null] } as unknown as CodexClientModel)).toBe(false);
 	});
 
 	it("maps codex catalog entries to pi models", () => {

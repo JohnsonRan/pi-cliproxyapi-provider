@@ -9,7 +9,7 @@ Pi provider extension that discovers models from [CLIProxyAPI](https://github.co
 3. Fetches `{root}/v1/models?client_version=pi`.
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
 5. Registers inference against `{root}/backend-api/`.
-6. Provides `/cpa-fast on|off|status` to request OpenAI priority processing for supported models.
+6. Provides `/fast` to toggle OpenAI priority processing for supported models.
 7. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 
 ## Install
@@ -150,17 +150,17 @@ pi then sends inference traffic to `{inference}/codex/responses`.
 
 OpenAI Fast mode requests the priority service tier. It can reduce latency for supported models, but consumes more OpenAI/Codex credits or incurs priority-processing pricing.
 
-Fast is **off by default**. Control it for the current pi session with:
+Fast is **off by default**. Toggle it for the current pi session with:
 
 ```text
-/cpa-fast on
-/cpa-fast off
-/cpa-fast status
+/fast
 ```
 
-The command is stored with the current pi session and restored when that session is resumed; it does not change the global default. To choose the default for new sessions, set `"fast": true` in `cliproxyapi.json` or set `CLIPROXYAPI_FAST=true`.
+Each invocation switches Fast between on and off. The setting is stored with the current pi session and restored when that session is resumed; it does not change the global default. To choose the default for new sessions, set `"fast": true` in `cliproxyapi.json` or set `CLIPROXYAPI_FAST=true`.
 
-Fast capability is catalog-driven: the plugin only injects `service_tier: "priority"` when the selected CLIProxyAPI model advertises `priority` in `service_tiers` or `fast` in `additional_speed_tiers`. Unsupported models are left unchanged, and `/cpa-fast status` reports whether Fast is effective for the current model. Fast is independent from pi's reasoning/thinking level.
+When Fast is effective, pi's model status appends a yellow lowercase `fast`, for example `gpt-5.6-sol • xhigh • fast`. When Fast is off, the original model status remains unchanged. Supported models do not produce a separate status notification; selecting an unsupported model and running `/fast` shows `This model does not support Fast mode.`
+
+Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast injects `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level.
 
 ## Model mapping
 
@@ -206,4 +206,4 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
   - HTTP 200 (including empty catalog) → credentials are persisted; setup commands hidden
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key
 - If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run setup later after models become available.
-- If Fast is enabled for a model that does not advertise Fast capability: the request is left unchanged and `/cpa-fast` reports a warning.
+- If the selected model does not provide a non-empty `service_tiers` array: the request is left unchanged and `/fast` reports `This model does not support Fast mode.`

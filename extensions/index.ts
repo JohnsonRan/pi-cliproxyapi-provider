@@ -11,7 +11,7 @@
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
  * 5. On success, models/credentials are saved and `/cliproxyapi` `/cpa` are hidden.
  * 6. Setup commands reappear after `/logout` or when a models request returns HTTP 401.
- * 7. `/fast` controls catalog-driven priority service tier injection per session.
+ * 7. `/fast` globally controls catalog-driven priority service tier injection.
  *
  * Uses a patched openai-codex-responses implementation that does not require
  * extracting chatgpt_account_id from the API key (plain CPA keys work).
@@ -27,7 +27,7 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { CLIPROXYAPI_CODEX_API, type CliproxyCodexStreamSimple, loadCliproxyCodexStreams } from "./codex-stream.ts";
-import { FAST_MODE_ENTRY_TYPE, FastModeController, restoreFastModeFromEntries } from "./fast.ts";
+import { FastModeController } from "./fast.ts";
 import { FastFooterController } from "./fast-footer.ts";
 import {
 	CONFIG_FILE_NAME,
@@ -53,6 +53,14 @@ interface SetupCommandsController {
 	show(): void;
 	hide(): void;
 	isVisible(): boolean;
+}
+
+class ConfigPersistenceError extends Error {
+	constructor(cause: unknown) {
+		const message = cause instanceof Error ? cause.message : String(cause);
+		super(`Failed to save ${CONFIG_FILE_NAME}: ${message}`, { cause });
+		this.name = "ConfigPersistenceError";
+	}
 }
 
 function logWarn(message: string): void {
@@ -150,14 +158,17 @@ async function configureAndRegister(options: {
 	} = options;
 
 	const loaded = await loadMappedModels(baseUrlInput, apiKey);
-	fastMode.setSupportedModelIds(loaded.fastModelIds);
 
-	saveConfigFile(agentDir, {
-		baseUrl: baseUrlInput,
-		apiKey,
-		providerId,
-		providerName,
-	});
+	try {
+		saveConfigFile(agentDir, {
+			baseUrl: baseUrlInput,
+			apiKey,
+			providerId,
+			providerName,
+		});
+	} catch (error) {
+		throw new ConfigPersistenceError(error);
+	}
 
 	registerProvider(pi, {
 		providerId,
@@ -171,6 +182,7 @@ async function configureAndRegister(options: {
 		setupCommands,
 		fastMode,
 	});
+	fastMode.setSupportedModelIds(loaded.fastModelIds);
 
 	// Login succeeded — hide dedicated setup commands from the slash menu.
 	setupCommands.hide();
@@ -223,6 +235,10 @@ function createOAuthHandlers(options: {
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					logWarn(`login validation failed: ${message}`);
+					if (error instanceof ConfigPersistenceError) {
+						callbacks.onProgress?.(message);
+						throw error;
+					}
 					// Auth failures should keep setup commands available for reconfiguration.
 					if (isUnauthorizedModelsError(error)) {
 						setupCommands.show();
@@ -446,6 +462,10 @@ function createSetupCommandsController(options: {
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				logWarn(`command setup failed: ${message}`);
+				if (error instanceof ConfigPersistenceError) {
+					ctx.ui.notify(message, "error");
+					return;
+				}
 				if (isUnauthorizedModelsError(error)) {
 					setupCommands.show();
 				}
@@ -563,37 +583,40 @@ function createSetupCommandsController(options: {
 
 export function registerFastCommand(options: {
 	pi: ExtensionAPI;
+	agentDir: string;
 	providerId: string;
 	fastMode: FastModeController;
 	onStatusChange?: (ctx: ExtensionContext) => void;
 }): void {
-	const { pi, providerId, fastMode, onStatusChange } = options;
-
-	pi.on("session_start", (_event, ctx) => {
-		restoreFastModeFromEntries(fastMode, ctx.sessionManager.getBranch());
-	});
-	pi.on("session_tree", (_event, ctx) => {
-		restoreFastModeFromEntries(fastMode, ctx.sessionManager.getBranch());
-		onStatusChange?.(ctx);
-	});
+	const { pi, agentDir, providerId, fastMode, onStatusChange } = options;
 
 	pi.registerCommand("fast", {
-		description: "Toggle CLIProxyAPI Fast mode for this session.",
+		description: "Toggle CLIProxyAPI Fast mode globally.",
 		handler: async (args, ctx) => {
 			if (args.trim()) {
 				ctx.ui.notify("Usage: /fast", "error");
 				return;
 			}
 
-			const currentModel = ctx.model;
-			if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
-				ctx.ui.notify("This model does not support Fast mode.", "warning");
+			const enabled = !fastMode.isEnabled();
+			try {
+				saveConfigFile(agentDir, { fast: enabled });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
 				return;
 			}
-
-			const enabled = fastMode.toggleSessionEnabled();
-			pi.appendEntry(FAST_MODE_ENTRY_TYPE, { enabled });
+			fastMode.setEnabled(enabled);
 			onStatusChange?.(ctx);
+
+			const currentModel = ctx.model;
+			if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
+				if (enabled) {
+					ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
+				} else {
+					ctx.ui.notify("Fast mode is disabled globally.", "info");
+				}
+			}
 		},
 	});
 }
@@ -606,14 +629,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const identity = resolveIdentity(agentDir);
 	const defaultBaseUrl = resolveDefaultBaseUrl(agentDir, identity.providerId);
 
-	let fastDefault = false;
+	let fastEnabled = false;
 	try {
-		fastDefault = resolveFastDefault(agentDir);
+		fastEnabled = resolveFastDefault(agentDir);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		logWarn(`invalid Fast configuration (${message}); using fast=false`);
 	}
-	const fastMode = new FastModeController(fastDefault);
+	const fastMode = new FastModeController(fastEnabled);
 
 	let streamSimple: CliproxyCodexStreamSimple;
 	try {
@@ -630,6 +653,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const fastFooter = new FastFooterController(identity.providerId, fastMode);
 	registerFastCommand({
 		pi,
+		agentDir,
 		providerId: identity.providerId,
 		fastMode,
 		onStatusChange: (ctx) => fastFooter.refresh(ctx),

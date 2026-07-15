@@ -172,8 +172,11 @@ export function loadConfigFile(agentDir: string): CliproxyConfigFile {
 	const configPath = join(agentDir, CONFIG_FILE_NAME);
 	try {
 		const raw = readFileSync(configPath, "utf8");
-		const parsed = JSON.parse(raw) as CliproxyConfigFile;
-		return parsed && typeof parsed === "object" ? parsed : {};
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error(`${CONFIG_FILE_NAME} must contain a JSON object`);
+		}
+		return parsed as CliproxyConfigFile;
 	} catch (error) {
 		const err = error as NodeJS.ErrnoException;
 		if (err.code !== "ENOENT") {
@@ -187,13 +190,7 @@ export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): vo
 	const configPath = join(agentDir, CONFIG_FILE_NAME);
 	mkdirSync(dirname(configPath), { recursive: true });
 
-	let existing: CliproxyConfigFile = {};
-	try {
-		existing = loadConfigFile(agentDir);
-	} catch {
-		existing = {};
-	}
-
+	const existing = loadConfigFile(agentDir);
 	const next: CliproxyConfigFile = {
 		...existing,
 		...config,
@@ -262,7 +259,7 @@ export function parseBooleanSetting(value: string): boolean | undefined {
 	}
 }
 
-/** Resolve the Fast default from env, then cliproxyapi.json, then false. */
+/** Resolve the Fast preference from env, then cliproxyapi.json, then false. */
 export function resolveFastDefault(agentDir: string): boolean {
 	const envValue = firstNonEmpty(process.env.CLIPROXYAPI_FAST);
 	if (envValue !== undefined) {

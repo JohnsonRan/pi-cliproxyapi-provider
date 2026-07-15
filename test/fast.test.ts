@@ -7,7 +7,7 @@ import {
 	withPriorityServiceTier,
 	wrapStreamSimpleForFast,
 } from "../extensions/codex-stream.ts";
-import { FAST_MODE_ENTRY_TYPE, FastModeController, restoreFastModeFromEntries } from "../extensions/fast.ts";
+import { FastModeController } from "../extensions/fast.ts";
 import { FastFooterController, formatFastModelStatus } from "../extensions/fast-footer.ts";
 import { loadMappedModels } from "../extensions/lib.ts";
 
@@ -17,60 +17,31 @@ const model = {
 } as Model<Api>;
 
 describe("FastModeController", () => {
-	it("combines configured default, session override, and model capability", () => {
+	it("combines the global preference with model capability", () => {
 		const mode = new FastModeController(false);
 		mode.setSupportedModelIds(["gpt-5.4", " gpt-5.5 ", ""]);
 
 		expect(mode.isEnabled()).toBe(false);
-		expect(mode.getSource()).toBe("configured-default");
 		expect(mode.isModelSupported("gpt-5.4")).toBe(true);
 		expect(mode.isModelSupported("gpt-5.5")).toBe(true);
 		expect(mode.isEffectiveFor("gpt-5.4")).toBe(false);
 		expect(mode.isEffectiveFor("custom-model")).toBe(false);
 
-		mode.setSessionEnabled(true);
-		expect(mode.getSource()).toBe("session-override");
+		mode.setEnabled(true);
 		expect(mode.isEffectiveFor("gpt-5.4")).toBe(true);
 		expect(mode.isEffectiveFor("custom-model")).toBe(false);
 
-		mode.setSessionEnabled(false);
-		expect(mode.isEffectiveFor("gpt-5.4")).toBe(false);
-		mode.clearSessionOverride();
-		expect(mode.getSource()).toBe("configured-default");
-		expect(mode.isEnabled()).toBe(false);
-	});
-
-	it("uses an enabled configured default until the session overrides it", () => {
-		const mode = new FastModeController(true);
-		mode.setSupportedModelIds(["gpt-5.4"]);
-
-		expect(mode.isEffectiveFor("gpt-5.4")).toBe(true);
-		mode.setSessionEnabled(false);
+		mode.setEnabled(false);
 		expect(mode.isEffectiveFor("gpt-5.4")).toBe(false);
 	});
 
-	it("toggles the effective session preference", () => {
+	it("updates the global preference", () => {
 		const mode = new FastModeController(false);
 
-		expect(mode.toggleSessionEnabled()).toBe(true);
+		mode.setEnabled(true);
 		expect(mode.isEnabled()).toBe(true);
-		expect(mode.toggleSessionEnabled()).toBe(false);
+		mode.setEnabled(false);
 		expect(mode.isEnabled()).toBe(false);
-	});
-
-	it("restores the latest Fast override from session entries", () => {
-		const mode = new FastModeController(true);
-		restoreFastModeFromEntries(mode, [
-			{ type: "custom", customType: FAST_MODE_ENTRY_TYPE, data: { enabled: true } },
-			{ type: "custom", customType: "other-extension", data: { enabled: true } },
-			{ type: "custom", customType: FAST_MODE_ENTRY_TYPE, data: { enabled: false } },
-		]);
-
-		expect(mode.isEnabled()).toBe(false);
-		expect(mode.getSource()).toBe("session-override");
-		restoreFastModeFromEntries(mode, []);
-		expect(mode.isEnabled()).toBe(true);
-		expect(mode.getSource()).toBe("configured-default");
 	});
 });
 
@@ -115,7 +86,7 @@ describe("Fast footer model status", () => {
 		};
 		const fastMode = new FastModeController(false);
 		fastMode.setSupportedModelIds([model.id]);
-		fastMode.toggleSessionEnabled();
+		fastMode.setEnabled(true);
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const pi = {
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
@@ -142,9 +113,9 @@ describe("Fast footer model status", () => {
 			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
 			expect(displayModel).toEqual({ id: "gpt-5.4", provider: "cliproxyapi", reasoning: true });
 
-			fastMode.toggleSessionEnabled();
+			fastMode.setEnabled(false);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
-			fastMode.toggleSessionEnabled();
+			fastMode.setEnabled(true);
 			fastMode.setSupportedModelIds([]);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
 			fastMode.setSupportedModelIds([model.id]);

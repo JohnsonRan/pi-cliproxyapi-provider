@@ -217,6 +217,17 @@ describe("config and auth file helpers", () => {
 		expect(raw.endsWith("\n")).toBe(true);
 	});
 
+	it("does not overwrite malformed or structurally invalid config files", () => {
+		const agentDir = tempAgentDir();
+		const configPath = join(agentDir, CONFIG_FILE_NAME);
+
+		for (const invalid of ["{not-json\n", "null\n", "[]\n", '"invalid"\n']) {
+			writeFileSync(configPath, invalid, "utf8");
+			expect(() => saveConfigFile(agentDir, { fast: true })).toThrow();
+			expect(readFileSync(configPath, "utf8")).toBe(invalid);
+		}
+	});
+
 	it("loads oauth auth connection metadata", () => {
 		const agentDir = tempAgentDir();
 		writeFileSync(

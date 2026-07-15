@@ -31,6 +31,7 @@ export interface CliproxyConfigFile {
 	apiKey?: string;
 	providerId?: string;
 	providerName?: string;
+	fast?: boolean;
 }
 
 export interface ResolvedIdentity {
@@ -50,6 +51,12 @@ export interface CodexReasoningLevel {
 	description?: string;
 }
 
+export interface CodexServiceTier {
+	id?: string;
+	name?: string;
+	description?: string;
+}
+
 export interface CodexClientModel {
 	slug?: string;
 	id?: string;
@@ -60,6 +67,9 @@ export interface CodexClientModel {
 	max_context_window?: number;
 	input_modalities?: string[];
 	supported_reasoning_levels?: CodexReasoningLevel[] | string[];
+	default_service_tier?: string | null;
+	service_tiers?: Array<CodexServiceTier | string>;
+	additional_speed_tiers?: string[];
 	visibility?: string;
 }
 
@@ -235,6 +245,44 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
 	};
 }
 
+export function parseBooleanSetting(value: string): boolean | undefined {
+	switch (value.trim().toLowerCase()) {
+		case "1":
+		case "true":
+		case "yes":
+		case "on":
+			return true;
+		case "0":
+		case "false":
+		case "no":
+		case "off":
+			return false;
+		default:
+			return undefined;
+	}
+}
+
+/** Resolve the Fast default from env, then cliproxyapi.json, then false. */
+export function resolveFastDefault(agentDir: string): boolean {
+	const envValue = firstNonEmpty(process.env.CLIPROXYAPI_FAST);
+	if (envValue !== undefined) {
+		const parsed = parseBooleanSetting(envValue);
+		if (parsed === undefined) {
+			throw new Error(`CLIPROXYAPI_FAST must be one of: true, false, 1, 0, yes, no, on, off`);
+		}
+		return parsed;
+	}
+
+	const file = loadConfigFile(agentDir);
+	if (file.fast === undefined) {
+		return false;
+	}
+	if (typeof file.fast !== "boolean") {
+		throw new Error(`${CONFIG_FILE_NAME} field "fast" must be a boolean`);
+	}
+	return file.fast;
+}
+
 /**
  * Resolve connection settings.
  * Priority: env > cliproxyapi.json > auth.json (/login) > default baseUrl
@@ -317,8 +365,29 @@ export function buildInputModalities(model: CodexClientModel): Array<"text" | "i
 	return input;
 }
 
+export function codexModelId(model: CodexClientModel): string {
+	return (model.slug ?? model.id ?? "").trim();
+}
+
+export function supportsFastServiceTier(model: CodexClientModel): boolean {
+	const serviceTiers = Array.isArray(model.service_tiers) ? model.service_tiers : [];
+	for (const tier of serviceTiers) {
+		const id =
+			typeof tier === "string"
+				? tier
+				: tier && typeof tier === "object" && typeof tier.id === "string"
+					? tier.id
+					: undefined;
+		if (id?.trim().toLowerCase() === "priority") {
+			return true;
+		}
+	}
+	const speedTiers = Array.isArray(model.additional_speed_tiers) ? model.additional_speed_tiers : [];
+	return speedTiers.some((tier) => typeof tier === "string" && tier.trim().toLowerCase() === "fast");
+}
+
 export function toPiModel(model: CodexClientModel): PiProviderModel | null {
-	const id = (model.slug ?? model.id ?? "").trim();
+	const id = codexModelId(model);
 	if (!id) {
 		return null;
 	}
@@ -404,14 +473,23 @@ export async function fetchCodexModels(modelsUrl: string, apiKey: string): Promi
 export async function loadMappedModels(
 	baseUrlInput: string,
 	apiKey: string,
-): Promise<{ models: PiProviderModel[]; inferenceBaseUrl: string; modelsUrl: string }> {
+): Promise<{ models: PiProviderModel[]; fastModelIds: string[]; inferenceBaseUrl: string; modelsUrl: string }> {
 	const endpoints = resolveEndpoints(baseUrlInput);
 	const remoteModels = await fetchCodexModels(endpoints.modelsUrl, apiKey);
 	const models = remoteModels.map(toPiModel).filter((model): model is PiProviderModel => model !== null);
+	const fastModelIds = Array.from(
+		new Set(
+			remoteModels
+				.filter(supportsFastServiceTier)
+				.map(codexModelId)
+				.filter((modelId) => modelId.length > 0),
+		),
+	);
 
 	// Empty catalog is valid: credentials passed (HTTP 200), just no usable models yet.
 	return {
 		models,
+		fastModelIds,
 		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
 	};

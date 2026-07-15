@@ -1,15 +1,16 @@
 # pi-cliproxyapi-provider
 
-Pi provider extension that discovers models from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and registers them for use in pi. It also ships a small TUI helper that shows elapsed runtime and a TPS summary after each agent turn.
+Pi provider extension that discovers models from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and registers them for use in pi. It supports catalog-driven OpenAI Fast mode and also ships a small TUI helper that shows elapsed runtime and a TPS summary after each agent turn.
 
 ## What it does
 
 1. Registers a provider that always appears in `/login` (subscription path) and via `/cliproxyapi` / `/cpa`.
 2. Interactive setup collects `baseUrl` + `apiKey`.
 3. Fetches `{root}/v1/models?client_version=pi`.
-4. Maps the CLIProxyAPI catalog into pi models.
+4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
 5. Registers inference against `{root}/backend-api/`.
-6. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
+6. Provides `/cpa-fast on|off|status` to request OpenAI priority processing for supported models.
+7. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 
 ## Install
 
@@ -98,7 +99,8 @@ You can still configure without `/login`.
 ```json
 {
   "baseUrl": "http://127.0.0.1:8317",
-  "apiKey": "12345"
+  "apiKey": "12345",
+  "fast": false
 }
 ```
 
@@ -110,6 +112,7 @@ Optional fields:
 | `apiKey` | _(required unless set via /login or env)_ | Bearer token / CPA API key |
 | `providerId` | `cliproxyapi` | Provider id shown in `/model` |
 | `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
+| `fast` | `false` | Default Fast mode for new sessions; only applies to catalog-supported models |
 
 ### Environment overrides
 
@@ -119,6 +122,7 @@ Optional fields:
 | `CLIPROXYAPI_API_KEY` | `apiKey` |
 | `CLIPROXYAPI_PROVIDER_ID` | `providerId` |
 | `CLIPROXYAPI_PROVIDER_NAME` | `providerName` |
+| `CLIPROXYAPI_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
 
 Resolution order for connection settings:
 
@@ -126,6 +130,8 @@ Resolution order for connection settings:
 2. `cliproxyapi.json`
 3. `/login` credentials in `auth.json`
 4. Default baseUrl `http://127.0.0.1:8317`
+
+Fast defaults resolve separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`.
 
 ### baseUrl normalization
 
@@ -139,6 +145,22 @@ Preferred form is **host:port only**:
 | `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 
 pi then sends inference traffic to `{inference}/codex/responses`.
+
+## Fast mode
+
+OpenAI Fast mode requests the priority service tier. It can reduce latency for supported models, but consumes more OpenAI/Codex credits or incurs priority-processing pricing.
+
+Fast is **off by default**. Control it for the current pi session with:
+
+```text
+/cpa-fast on
+/cpa-fast off
+/cpa-fast status
+```
+
+The command is stored with the current pi session and restored when that session is resumed; it does not change the global default. To choose the default for new sessions, set `"fast": true` in `cliproxyapi.json` or set `CLIPROXYAPI_FAST=true`.
+
+Fast capability is catalog-driven: the plugin only injects `service_tier: "priority"` when the selected CLIProxyAPI model advertises `priority` in `service_tiers` or `fast` in `additional_speed_tiers`. Unsupported models are left unchanged, and `/cpa-fast status` reports whether Fast is effective for the current model. Fast is independent from pi's reasoning/thinking level.
 
 ## Model mapping
 
@@ -184,3 +206,4 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
   - HTTP 200 (including empty catalog) → credentials are persisted; setup commands hidden
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key
 - If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run setup later after models become available.
+- If Fast is enabled for a model that does not advertise Fast capability: the request is left unchanged and `/cpa-fast` reports a warning.

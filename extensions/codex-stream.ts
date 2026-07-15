@@ -33,6 +33,48 @@ export type CliproxyCodexStreams = {
 	api: typeof CLIPROXYAPI_CODEX_API;
 };
 
+export interface CliproxyCodexStreamOptions {
+	shouldUseFast?: (model: Model<Api>) => boolean;
+}
+
+type PayloadHook = NonNullable<SimpleStreamOptions["onPayload"]>;
+
+export function withPriorityServiceTier(payload: unknown): unknown {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		return payload;
+	}
+	return {
+		...(payload as Record<string, unknown>),
+		service_tier: "priority",
+	};
+}
+
+/** Apply Fast before pi's shared payload hooks so later extensions retain final control. */
+export async function applyFastPayloadHook(
+	payload: unknown,
+	model: Model<Api>,
+	onPayload?: PayloadHook,
+): Promise<unknown> {
+	const fastPayload = withPriorityServiceTier(payload);
+	const nextPayload = await onPayload?.(fastPayload, model);
+	return nextPayload === undefined ? fastPayload : nextPayload;
+}
+
+export function wrapStreamSimpleForFast(
+	streamSimple: CliproxyCodexStreamSimple,
+	shouldUseFast?: (model: Model<Api>) => boolean,
+): CliproxyCodexStreamSimple {
+	return (model, context, streamOptions) => {
+		if (!shouldUseFast?.(model)) {
+			return streamSimple(model, context, streamOptions);
+		}
+		return streamSimple(model, context, {
+			...streamOptions,
+			onPayload: (payload, payloadModel) => applyFastPayloadHook(payload, payloadModel, streamOptions?.onPayload),
+		});
+	};
+}
+
 const EXTRACT_ACCOUNT_ID_PATCH = `function extractAccountId(token) {
     // CLIProxyAPI accepts plain API keys as well as ChatGPT JWTs.
     // Never throw: missing account id simply means no chatgpt-account-id header.
@@ -123,7 +165,10 @@ function resolveOriginalCodexModulePath(): { path: string; dir: string } {
 	throw new Error(`Cannot resolve openai-codex-responses.js (tried: ${candidates.join(", ") || "none"})`);
 }
 
-export async function loadCliproxyCodexStreams(providerIds: string[] = ["cliproxyapi"]): Promise<CliproxyCodexStreams> {
+export async function loadCliproxyCodexStreams(
+	providerIds: string[] = ["cliproxyapi"],
+	options: CliproxyCodexStreamOptions = {},
+): Promise<CliproxyCodexStreams> {
 	const { path: originalPath, dir: originalDir } = resolveOriginalCodexModulePath();
 	const originalSource = readFileSync(originalPath, "utf8");
 	const patched = rewriteRelativeImports(patchCodexSource(originalSource, providerIds), originalDir);
@@ -145,9 +190,11 @@ export async function loadCliproxyCodexStreams(providerIds: string[] = ["cliprox
 		throw new Error("patched openai-codex-responses module missing streamSimple/stream exports");
 	}
 
+	const streamSimple = wrapStreamSimpleForFast(mod.streamSimple, options.shouldUseFast);
+
 	return {
 		api: CLIPROXYAPI_CODEX_API,
-		streamSimple: mod.streamSimple,
+		streamSimple,
 		stream: mod.stream,
 	};
 }

@@ -7,6 +7,7 @@ import {
 	buildInputModalities,
 	buildThinkingLevelMap,
 	CONFIG_FILE_NAME,
+	type CodexClientModel,
 	DEFAULT_BASE_URL,
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_MAX_TOKENS,
@@ -20,9 +21,12 @@ import {
 	loadAuthConnection,
 	loadConfigFile,
 	ModelsHttpError,
+	parseBooleanSetting,
 	resolveEndpoints,
+	resolveFastDefault,
 	resolveIdentity,
 	saveConfigFile,
+	supportsFastServiceTier,
 	toPiModel,
 	ZERO_COST,
 } from "../extensions/lib.ts";
@@ -115,6 +119,20 @@ describe("model mapping helpers", () => {
 		expect(buildInputModalities({})).toEqual(["text"]);
 	});
 
+	it("detects Fast support from the CPA catalog", () => {
+		expect(supportsFastServiceTier({ service_tiers: [{ id: "priority", name: "Fast" }] })).toBe(true);
+		expect(supportsFastServiceTier({ service_tiers: ["PRIORITY"] })).toBe(true);
+		expect(supportsFastServiceTier({ additional_speed_tiers: ["FAST"] })).toBe(true);
+		expect(supportsFastServiceTier({ service_tiers: [], additional_speed_tiers: [] })).toBe(false);
+		expect(supportsFastServiceTier({ service_tiers: [{ id: "flex" }] })).toBe(false);
+	});
+
+	it("treats malformed optional Fast metadata as unsupported", () => {
+		expect(supportsFastServiceTier({ service_tiers: [null] } as unknown as CodexClientModel)).toBe(false);
+		expect(supportsFastServiceTier({ service_tiers: {} } as unknown as CodexClientModel)).toBe(false);
+		expect(supportsFastServiceTier({ additional_speed_tiers: [null] } as unknown as CodexClientModel)).toBe(false);
+	});
+
 	it("maps codex catalog entries to pi models", () => {
 		const model = toPiModel({
 			slug: "gpt-5",
@@ -184,7 +202,7 @@ describe("config and auth file helpers", () => {
 
 	it("saves and merges config file", () => {
 		const agentDir = tempAgentDir();
-		saveConfigFile(agentDir, { baseUrl: "http://a", apiKey: "k1" });
+		saveConfigFile(agentDir, { baseUrl: "http://a", apiKey: "k1", fast: true });
 		saveConfigFile(agentDir, { apiKey: "k2", providerName: "CPA" });
 
 		const loaded = loadConfigFile(agentDir);
@@ -192,6 +210,7 @@ describe("config and auth file helpers", () => {
 			baseUrl: "http://a",
 			apiKey: "k2",
 			providerName: "CPA",
+			fast: true,
 		});
 
 		const raw = readFileSync(join(agentDir, CONFIG_FILE_NAME), "utf8");
@@ -234,6 +253,36 @@ describe("config and auth file helpers", () => {
 		expect(loadAuthConnection(agentDir, "cliproxyapi")).toEqual({
 			apiKey: "plain-key",
 		});
+	});
+
+	it("parses Fast boolean settings", () => {
+		for (const value of ["true", "1", "yes", "ON"]) {
+			expect(parseBooleanSetting(value)).toBe(true);
+		}
+		for (const value of ["false", "0", "no", "OFF"]) {
+			expect(parseBooleanSetting(value)).toBe(false);
+		}
+		expect(parseBooleanSetting("sometimes")).toBeUndefined();
+	});
+
+	it("resolves Fast default from config with env precedence", () => {
+		const agentDir = tempAgentDir();
+		saveConfigFile(agentDir, { fast: true });
+		const previous = process.env.CLIPROXYAPI_FAST;
+		try {
+			delete process.env.CLIPROXYAPI_FAST;
+			expect(resolveFastDefault(agentDir)).toBe(true);
+			process.env.CLIPROXYAPI_FAST = "off";
+			expect(resolveFastDefault(agentDir)).toBe(false);
+			process.env.CLIPROXYAPI_FAST = "invalid";
+			expect(() => resolveFastDefault(agentDir)).toThrow(/CLIPROXYAPI_FAST/);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CLIPROXYAPI_FAST;
+			} else {
+				process.env.CLIPROXYAPI_FAST = previous;
+			}
+		}
 	});
 
 	it("resolves identity defaults", () => {

@@ -55,6 +55,16 @@ interface SetupCommandsController {
 	isVisible(): boolean;
 	/** Hide when /login credentials exist; show otherwise. */
 	syncFromAuth(): void;
+	/** Whether /login currently has a stored credential for this provider. */
+	hasLoginCredential(): boolean;
+}
+
+function hasLoginCredential(agentDir: string, providerId: string): boolean {
+	try {
+		return Boolean(loadAuthConnection(agentDir, providerId)?.apiKey);
+	} catch {
+		return false;
+	}
 }
 
 class ConfigPersistenceError extends Error {
@@ -377,6 +387,9 @@ function createSetupCommandsController(options: {
 		syncFromAuth() {
 			/* replaced below */
 		},
+		hasLoginCredential() {
+			return false;
+		},
 	};
 
 	let visible = false;
@@ -392,7 +405,7 @@ function createSetupCommandsController(options: {
 			return;
 		}
 
-		if (loadAuthConnection(agentDir, providerId)?.apiKey) {
+		if (hasLoginCredential(agentDir, providerId)) {
 			// Still authenticated via /login — hide the dedicated command and redirect.
 			setupCommands.hide();
 			ctx.ui.notify(
@@ -559,8 +572,10 @@ function createSetupCommandsController(options: {
 
 	setupCommands.isVisible = (): boolean => visible;
 
+	setupCommands.hasLoginCredential = (): boolean => hasLoginCredential(agentDir, providerId);
+
 	setupCommands.syncFromAuth = (): void => {
-		if (loadAuthConnection(agentDir, providerId)?.apiKey) {
+		if (hasLoginCredential(agentDir, providerId)) {
 			setupCommands.hide();
 		} else {
 			setupCommands.show();
@@ -568,6 +583,55 @@ function createSetupCommandsController(options: {
 	};
 
 	return setupCommands;
+}
+
+/**
+ * pi's slash autocomplete snapshots commands at setup time. Deleting from the
+ * extension command Map alone does not refresh that snapshot, so also filter
+ * `/cliproxyapi` out of live suggestions while a /login credential exists.
+ */
+function installSetupCommandAutocompleteFilter(options: {
+	pi: ExtensionAPI;
+	agentDir: string;
+	providerId: string;
+	setupCommands: SetupCommandsController;
+}): void {
+	const { pi, agentDir, providerId, setupCommands } = options;
+	let installed = false;
+
+	pi.on("session_start", (_event, ctx) => {
+		setupCommands.syncFromAuth();
+
+		if (installed) {
+			return;
+		}
+		if (typeof ctx.ui.addAutocompleteProvider !== "function") {
+			return;
+		}
+		installed = true;
+
+		ctx.ui.addAutocompleteProvider((current) => ({
+			triggerCharacters: current.triggerCharacters,
+			shouldTriggerFileCompletion: current.shouldTriggerFileCompletion?.bind(current),
+			applyCompletion: current.applyCompletion.bind(current),
+			async getSuggestions(lines, cursorLine, cursorCol, suggestionOptions) {
+				// Keep Map visibility in sync when the user opens `/`.
+				setupCommands.syncFromAuth();
+
+				const result = await current.getSuggestions(lines, cursorLine, cursorCol, suggestionOptions);
+				if (!result?.items?.length || !hasLoginCredential(agentDir, providerId)) {
+					return result;
+				}
+
+				const items = result.items.filter((item) => item.value !== "cliproxyapi" && item.label !== "cliproxyapi");
+				if (items.length === 0) {
+					return null;
+				}
+				return { ...result, items };
+			},
+		}));
+		logInfo("installed /cliproxyapi autocomplete filter for logged-in sessions");
+	});
 }
 
 export function registerFastCommand(options: {
@@ -659,10 +723,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		fastMode,
 	});
 
-	// Reconcile visibility after /logout (auth.json removed) or when credentials reappear.
-	// pi has no logout extension event, so re-check on session lifecycle and submitted input.
-	pi.on("session_start", () => {
-		setupCommands.syncFromAuth();
+	// Reconcile Map visibility + autocomplete filtering when auth changes.
+	// pi has no logout extension event and slash autocomplete is snapshotted, so we:
+	// 1) delete/re-add the command Map entry
+	// 2) filter suggestions live while a /login credential exists
+	// 3) re-check on submitted input after /logout
+	installSetupCommandAutocompleteFilter({
+		pi,
+		agentDir,
+		providerId: identity.providerId,
+		setupCommands,
 	});
 	pi.on("input", () => {
 		setupCommands.syncFromAuth();
@@ -670,6 +740,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	// Initial visibility: hide when already logged in via /login.
 	setupCommands.syncFromAuth();
+	if (setupCommands.hasLoginCredential()) {
+		logInfo("CLIProxyAPI already authenticated via /login; /cliproxyapi stays hidden");
+	}
 
 	// Always register oauth so the provider is visible in /login immediately after install.
 	registerProvider(pi, {

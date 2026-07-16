@@ -35,7 +35,7 @@ This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only s
 /cliproxyapi
 ```
 
-This slash command is shown only when CLIProxyAPI is **not** already authenticated via `/login` (no matching credential in `auth.json`). After a successful `/login`, it is hidden from the `/` menu; reconfigure with `/login CLIProxyAPI`, or run `/logout` first to bring `/cliproxyapi` back. Config-file / env-only setups (no `/login` credential) keep the command available for reconfiguration.
+This slash command is shown only when CLIProxyAPI is **not** already authenticated via `/login` (no matching credential in `auth.json`). After a successful `/login`, it is removed from the command registry and filtered out of `/` autocomplete; reconfigure with `/login CLIProxyAPI`, or run `/logout` first to bring `/cliproxyapi` back. Config-file / env-only setups (no `/login` credential) keep the command available for reconfiguration. Restart pi or run `/reload` after upgrading so the new visibility logic is loaded.
 
 ### Or use /login shortcuts (skip the menu)
 

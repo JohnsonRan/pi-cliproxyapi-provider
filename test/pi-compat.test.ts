@@ -42,6 +42,7 @@ async function withTempAgentDir(run: (agentDir: string) => Promise<void>): Promi
 
 function createPiMock(commands: Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>) {
 	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
+	const autocompleteWrappers: Array<(current: unknown) => unknown> = [];
 	const pi = {
 		registerCommand: vi.fn((name: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]) => {
 			commands.set(name, options);
@@ -52,14 +53,32 @@ function createPiMock(commands: Map<string, Parameters<ExtensionAPI["registerCom
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 		}),
 	} as unknown as ExtensionAPI;
-	return { pi, handlers };
+	return { pi, handlers, autocompleteWrappers };
+}
+
+async function runSessionStart(
+	handlers: Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>,
+	autocompleteWrappers: Array<(current: unknown) => unknown>,
+): Promise<void> {
+	const sessionCtx = {
+		mode: "interactive",
+		modelRegistry: {},
+		ui: {
+			addAutocompleteProvider: (factory: (current: unknown) => unknown) => {
+				autocompleteWrappers.push(factory);
+			},
+		},
+	} as unknown as ExtensionContext;
+	for (const handler of handlers.get("session_start") ?? []) {
+		await handler({ type: "session_start", reason: "startup" }, sessionCtx);
+	}
 }
 
 describe("pi 0.80.9 compatibility", () => {
 	it("starts with the current ModelRegistry facade and keeps the setup command available when not logged in", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
-			const { pi, handlers } = createPiMock(commands);
+			const { pi, handlers, autocompleteWrappers } = createPiMock(commands);
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 				new Response(JSON.stringify({ models: [] }), {
 					status: 200,
@@ -71,13 +90,7 @@ describe("pi 0.80.9 compatibility", () => {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).not.toHaveBeenCalled();
 
-				const sessionCtx = {
-					mode: "print",
-					modelRegistry: {},
-				} as unknown as ExtensionContext;
-				for (const handler of handlers.get("session_start") ?? []) {
-					await handler({}, sessionCtx);
-				}
+				await runSessionStart(handlers, autocompleteWrappers);
 
 				expect([...commands.keys()]).toEqual(expect.arrayContaining(["cliproxyapi", "fast"]));
 				expect(commands.has("cpa")).toBe(false);
@@ -93,6 +106,7 @@ describe("pi 0.80.9 compatibility", () => {
 				for (const [, config] of (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls) {
 					expect(config).not.toHaveProperty("apiKey");
 				}
+				expect(autocompleteWrappers.length).toBe(1);
 
 				const input = vi
 					.fn<ExtensionCommandContext["ui"]["input"]>()
@@ -151,7 +165,7 @@ describe("pi 0.80.9 compatibility", () => {
 		});
 	});
 
-	it("hides /cliproxyapi when already logged in and restores it after logout", async () => {
+	it("hides /cliproxyapi when already logged in and filters it from autocomplete", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),
@@ -172,7 +186,7 @@ describe("pi 0.80.9 compatibility", () => {
 			);
 
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
-			const { pi, handlers } = createPiMock(commands);
+			const { pi, handlers, autocompleteWrappers } = createPiMock(commands);
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 				new Response(JSON.stringify({ models: [] }), {
 					status: 200,
@@ -187,6 +201,27 @@ describe("pi 0.80.9 compatibility", () => {
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(commands.has("fast")).toBe(true);
 
+				await runSessionStart(handlers, autocompleteWrappers);
+				expect(autocompleteWrappers.length).toBe(1);
+
+				const baseProvider = {
+					async getSuggestions() {
+						return {
+							items: [
+								{ value: "cliproxyapi", label: "cliproxyapi", description: "setup" },
+								{ value: "fast", label: "fast", description: "toggle" },
+							],
+							prefix: "/",
+						};
+					},
+					applyCompletion() {
+						return { lines: [""], cursorLine: 0, cursorCol: 0 };
+					},
+				};
+				const wrapped = autocompleteWrappers[0](baseProvider) as typeof baseProvider;
+				const suggestions = await wrapped.getSuggestions();
+				expect(suggestions?.items.map((item) => item.value)).toEqual(["fast"]);
+
 				// Simulate /logout by clearing auth.json, then an input event should re-show the command.
 				writeFileSync(join(agentDir, AUTH_FILE_NAME), "{}\n", "utf8");
 				const sessionCtx = {
@@ -198,6 +233,9 @@ describe("pi 0.80.9 compatibility", () => {
 				}
 
 				expect(commands.has("cliproxyapi")).toBe(true);
+
+				const afterLogout = await wrapped.getSuggestions();
+				expect(afterLogout?.items.map((item) => item.value)).toEqual(["cliproxyapi", "fast"]);
 			} finally {
 				fetchMock.mockRestore();
 			}

@@ -4,6 +4,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 
 // Local shape matching pi ThinkingLevelMap; avoid hard runtime peer imports here.
 export type ThinkingLevelMap = Partial<
@@ -199,31 +200,17 @@ export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): vo
 }
 
 export function loadAuthConnection(agentDir: string, providerId: string): { baseUrl?: string; apiKey?: string } | null {
-	const authPath = join(agentDir, AUTH_FILE_NAME);
-	try {
-		const raw = readFileSync(authPath, "utf8");
-		const data = JSON.parse(raw) as Record<string, any>;
-		const entry = data?.[providerId];
-		if (!entry || typeof entry !== "object") {
-			return null;
-		}
+	const entry = readStoredCredential(providerId, join(agentDir, AUTH_FILE_NAME));
+	if (entry?.type === "oauth" && typeof entry.access === "string" && entry.access.trim()) {
+		const meta = decodeRefreshMeta(typeof entry.refresh === "string" ? entry.refresh : undefined);
+		return {
+			apiKey: entry.access.trim(),
+			baseUrl: meta?.baseUrl,
+		};
+	}
 
-		if (entry.type === "oauth" && typeof entry.access === "string" && entry.access.trim()) {
-			const meta = decodeRefreshMeta(typeof entry.refresh === "string" ? entry.refresh : undefined);
-			return {
-				apiKey: entry.access.trim(),
-				baseUrl: meta?.baseUrl,
-			};
-		}
-
-		if (entry.type === "api_key" && typeof entry.key === "string" && entry.key.trim()) {
-			return { apiKey: entry.key.trim() };
-		}
-	} catch (error) {
-		const err = error as NodeJS.ErrnoException;
-		if (err.code !== "ENOENT") {
-			throw error;
-		}
+	if (entry?.type === "api_key" && typeof entry.key === "string" && entry.key.trim()) {
+		return { apiKey: entry.key.trim() };
 	}
 	return null;
 }
@@ -400,7 +387,7 @@ export function toPiModel(model: CodexClientModel): PiProviderModel | null {
 	};
 }
 
-/** HTTP error from /v1/models (used to detect 401 and re-show setup commands). */
+/** HTTP error from /v1/models (used to detect 401 and keep the setup command available). */
 export class ModelsHttpError extends Error {
 	readonly status: number;
 	readonly statusText: string;

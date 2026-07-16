@@ -131,6 +131,9 @@ function patchCodexSource(source: string, providerIds: string[]): string {
 	// Keep assistant message api metadata aligned with the registered custom api id.
 	src = src.replaceAll(`api: "openai-codex-responses"`, `api: ${JSON.stringify(CLIPROXYAPI_CODEX_API)}`);
 
+	// The generated module lives outside the original source map directory.
+	src = src.replace(/^\/\/# sourceMappingURL=.*$/gm, "");
+
 	return src;
 }
 

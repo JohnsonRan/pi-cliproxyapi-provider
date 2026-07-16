@@ -1,17 +1,16 @@
 /**
  * CLIProxyAPI dynamic model provider for pi.
  *
- * Supports login-style setup via `/login` and dedicated commands:
- * 1. Provider always appears under "Use a subscription" as CLIProxyAPI
- *    (pi only supports multi-field prompts on the oauth/subscription path).
+ * Supports login-style setup via `/login` and a dedicated command:
+ * 1. Provider always appears under "Sign in with an account" as CLIProxyAPI
+ *    (pi only supports multi-field prompts on the account/OAuth path).
  * 2. Preferred shortcuts: `/login CLIProxyAPI`, `/login cliproxyapi`,
- *    or dedicated commands `/cliproxyapi` / `/cpa` (shown only when not authenticated).
+ *    or the dedicated `/cliproxyapi` command.
  * 3. Setup prompts for baseUrl + apiKey.
  * 4. Final login step validates credentials via /v1/models?client_version=pi
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
- * 5. On success, models/credentials are saved and `/cliproxyapi` `/cpa` are hidden.
- * 6. Setup commands reappear after `/logout` or when a models request returns HTTP 401.
- * 7. `/fast` globally controls catalog-driven priority service tier injection.
+ * 5. On success, models/credentials are saved and registered immediately.
+ * 6. `/fast` globally controls catalog-driven priority service tier injection.
  *
  * Uses a patched openai-codex-responses implementation that does not require
  * extracting chatgpt_account_id from the API key (plain CPA keys work).
@@ -48,11 +47,9 @@ import {
 	saveConfigFile,
 } from "./lib.ts";
 
-/** Controls visibility of /cliproxyapi and /cpa in the slash-command menu. */
+/** Registers /cliproxyapi in the slash-command menu. */
 interface SetupCommandsController {
 	show(): void;
-	hide(): void;
-	isVisible(): boolean;
 }
 
 class ConfigPersistenceError extends Error {
@@ -184,9 +181,6 @@ async function configureAndRegister(options: {
 	});
 	fastMode.setSupportedModelIds(loaded.fastModelIds);
 
-	// Login succeeded — hide dedicated setup commands from the slash menu.
-	setupCommands.hide();
-
 	return { modelCount: loaded.models.length, modelsUrl: loaded.modelsUrl };
 }
 
@@ -239,7 +233,7 @@ function createOAuthHandlers(options: {
 						callbacks.onProgress?.(message);
 						throw error;
 					}
-					// Auth failures should keep setup commands available for reconfiguration.
+					// Auth failures should keep the setup command available for reconfiguration.
 					if (isUnauthorizedModelsError(error)) {
 						setupCommands.show();
 					}
@@ -332,40 +326,7 @@ function registerProvider(
 	});
 }
 
-const SETUP_COMMAND_NAMES = ["cliproxyapi", "cpa"] as const;
-
-/** Avoid double-wrapping the same AuthStorage instance across session reloads. */
-const logoutWatchedStorages = new WeakSet<object>();
-
-/**
- * pi has no logout extension event. Wrap authStorage.logout so we can re-show
- * setup commands when this provider is removed via /logout.
- */
-function watchProviderLogout(
-	authStorage: { logout(provider: string): void },
-	providerId: string,
-	onLogout: () => void,
-): void {
-	if (logoutWatchedStorages.has(authStorage as object)) {
-		return;
-	}
-	logoutWatchedStorages.add(authStorage as object);
-
-	const originalLogout = authStorage.logout.bind(authStorage);
-	authStorage.logout = (provider: string): void => {
-		originalLogout(provider);
-		if (provider === providerId) {
-			onLogout();
-		}
-	};
-}
-
-/**
- * Show/hide /cliproxyapi and /cpa.
- *
- * pi has registerCommand but no unregisterCommand, so hide() removes entries from the
- * extension's internal commands Map captured during the first registration.
- */
+/** Register the always-available /cliproxyapi setup command. */
 function createSetupCommandsController(options: {
 	pi: ExtensionAPI;
 	agentDir: string;
@@ -377,27 +338,27 @@ function createSetupCommandsController(options: {
 }): SetupCommandsController {
 	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode } = options;
 
-	// Self-referential controller so handlers can hide/show after validation.
+	// Self-referential controller so validation failures can ensure commands are registered.
 	const setupCommands: SetupCommandsController = {
 		show() {
 			/* replaced below */
 		},
-		hide() {
-			/* replaced below */
-		},
-		isVisible() {
-			return false;
-		},
 	};
 
 	let visible = false;
-	// Captured extension.commands Map (pi has no public unregisterCommand API).
-	let commandMap: Map<string, unknown> | null = null;
 
 	const handler = async (_args: string, ctx: ExtensionCommandContext): Promise<void> => {
 		if (!ctx.hasUI) {
 			ctx.ui.notify(
 				`Interactive UI unavailable. Use /login ${providerName}, set ${CONFIG_FILE_NAME}, or CLIPROXYAPI_* env vars.`,
+				"error",
+			);
+			return;
+		}
+
+		if (loadAuthConnection(agentDir, providerId)?.apiKey) {
+			ctx.ui.notify(
+				`CLIProxyAPI credentials are already stored by /login. Use /login ${providerName} to replace them, or run /logout before /cliproxyapi.`,
 				"error",
 			);
 			return;
@@ -450,12 +411,6 @@ function createSetupCommandsController(options: {
 					fastMode,
 				});
 
-				// Persist only after successful validation; keep AuthStorage in-memory too.
-				ctx.modelRegistry.authStorage.set(providerId, {
-					type: "oauth",
-					...buildOAuthCredentials(currentBaseUrl, currentApiKey),
-				});
-
 				logInfo(`command setup ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
 				ctx.ui.notify(`CLIProxyAPI configured: ${result.modelCount} models from ${result.modelsUrl}`, "info");
 				return;
@@ -506,77 +461,21 @@ function createSetupCommandsController(options: {
 		}
 	};
 
-	const commandSpecs: Array<{ name: (typeof SETUP_COMMAND_NAMES)[number]; description: string }> = [
-		{
-			name: "cliproxyapi",
+	const registerCommand = (): void => {
+		pi.registerCommand("cliproxyapi", {
 			description: "Configure CLIProxyAPI (baseUrl + API key) and load models. Prefer this or /login CLIProxyAPI.",
-		},
-		{
-			name: "cpa",
-			description: "Alias for /cliproxyapi — configure CLIProxyAPI and load models.",
-		},
-	];
-
-	const registerAll = (): void => {
-		for (const spec of commandSpecs) {
-			pi.registerCommand(spec.name, {
-				description: spec.description,
-				handler,
-			});
-		}
+			handler,
+		});
 	};
 
 	setupCommands.show = (): void => {
 		if (visible) {
 			return;
 		}
-
-		if (!commandMap) {
-			// Capture the extension.commands Map during first registration.
-			const originalSet = Map.prototype.set;
-			Map.prototype.set = function setWithCapture(this: Map<unknown, unknown>, key: unknown, value: unknown) {
-				if (
-					key === "cliproxyapi" &&
-					value &&
-					typeof value === "object" &&
-					"handler" in (value as Record<string, unknown>)
-				) {
-					commandMap = this as Map<string, unknown>;
-				}
-				return originalSet.call(this, key, value);
-			} as typeof Map.prototype.set;
-			try {
-				registerAll();
-			} finally {
-				Map.prototype.set = originalSet;
-			}
-			if (!commandMap) {
-				logWarn("could not capture command map; /cliproxyapi and /cpa cannot be hidden after login");
-			}
-		} else {
-			registerAll();
-		}
-
+		registerCommand();
 		visible = true;
-		logInfo("setup commands shown: /cliproxyapi, /cpa");
+		logInfo("setup command registered: /cliproxyapi");
 	};
-
-	setupCommands.hide = (): void => {
-		if (!visible) {
-			return;
-		}
-		if (!commandMap) {
-			logWarn("setup commands remain visible (no command map capture for unregister)");
-			return;
-		}
-		for (const name of SETUP_COMMAND_NAMES) {
-			commandMap.delete(name);
-		}
-		visible = false;
-		logInfo("setup commands hidden (CLIProxyAPI already authenticated)");
-	};
-
-	setupCommands.isVisible = (): boolean => visible;
 
 	return setupCommands;
 }
@@ -670,14 +569,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		fastMode,
 	});
 
-	// Re-show setup commands when the user /logout this provider.
-	// Installed on session_start because AuthStorage is only available via ctx then.
-	pi.on("session_start", (_event, ctx) => {
-		watchProviderLogout(ctx.modelRegistry.authStorage, identity.providerId, () => {
-			setupCommands.show();
-			logInfo(`logout detected for ${identity.providerId}: setup commands restored: /cliproxyapi, /cpa`);
-		});
-	});
+	setupCommands.show();
 
 	// Always register oauth so the provider is visible in /login immediately after install.
 	registerProvider(pi, {
@@ -695,8 +587,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	if (!connection) {
 		setupCommands.show();
 		logInfo(
-			`not configured yet. Prefer /cliproxyapi (or /cpa), or /login ${identity.providerName}. ` +
-				`Menu path: /login → Use a subscription → ${identity.providerName}. ` +
+			`not configured yet. Prefer /cliproxyapi or /login ${identity.providerName}. ` +
+				`Menu path: /login → Sign in with an account → ${identity.providerName}. ` +
 				`Or set ${CONFIG_FILE_NAME} / CLIPROXYAPI_API_KEY.`,
 		);
 		return;
@@ -717,14 +609,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			setupCommands,
 			fastMode,
 		});
-		// Already authenticated — keep /cliproxyapi and /cpa hidden.
-		setupCommands.hide();
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (isUnauthorizedModelsError(error)) {
-			// 401 → credentials rejected; re-show setup commands for reconfiguration.
+			// 401 → credentials rejected; keep the setup command available for reconfiguration.
 			setupCommands.show();
-			logWarn(`models request unauthorized (${message}). Setup commands restored: /cliproxyapi, /cpa.`);
+			logWarn(`models request unauthorized (${message}). Setup command remains available: /cliproxyapi.`);
 		} else {
 			// Other failures (network, etc.): still offer setup so the user can fix baseUrl/key.
 			setupCommands.show();

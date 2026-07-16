@@ -2,7 +2,8 @@
  * CLIProxyAPI dynamic model provider for pi.
  *
  * Supports login-style setup via `/login` and a dedicated command:
- * 1. Provider always appears under "Sign in with an account" as CLIProxyAPI
+ * 1. Provider is registered as OAuth-only so `/login CLIProxyAPI` / `/login cliproxyapi`
+ *    skip the API-key vs account selector and go straight to multi-field prompts
  *    (pi only supports multi-field prompts on the account/OAuth path).
  * 2. Preferred shortcuts: `/login CLIProxyAPI`, `/login cliproxyapi`,
  *    or the dedicated `/cliproxyapi` command.
@@ -140,6 +141,13 @@ async function configureAndRegister(options: {
 	streamSimple: CliproxyCodexStreamSimple;
 	setupCommands: SetupCommandsController;
 	fastMode: FastModeController;
+	/**
+	 * When true, register a configured API key for ambient request auth.
+	 * Only used by `/cliproxyapi` (no auth.json write). `/login` must leave this
+	 * false so the provider stays OAuth-only and `/login <provider>` skips the
+	 * API-key vs account selector.
+	 */
+	registerConfiguredApiKey?: boolean;
 }): Promise<{ modelCount: number; modelsUrl: string }> {
 	const {
 		pi,
@@ -152,6 +160,7 @@ async function configureAndRegister(options: {
 		streamSimple,
 		setupCommands,
 		fastMode,
+		registerConfiguredApiKey = false,
 	} = options;
 
 	const loaded = await loadMappedModels(baseUrlInput, apiKey);
@@ -171,7 +180,7 @@ async function configureAndRegister(options: {
 		providerId,
 		providerName,
 		baseUrlInput,
-		apiKey,
+		apiKey: registerConfiguredApiKey ? apiKey : undefined,
 		models: loaded.models,
 		defaultBaseUrl: baseUrlInput || defaultBaseUrl,
 		agentDir,
@@ -313,14 +322,19 @@ function registerProvider(
 		fastMode,
 	});
 
+	// Replace any previous registration so an earlier ambient apiKey does not linger
+	// via registerProvider merge semantics and reintroduce the auth-type selector.
+	pi.unregisterProvider(providerId);
+
 	pi.registerProvider(providerId, {
 		name: providerName,
 		baseUrl: endpoints.inferenceBaseUrl,
 		api: CLIPROXYAPI_CODEX_API,
 		streamSimple,
-		// Keep oauth always registered so /login lists this provider even before models exist.
+		// OAuth-only keeps `/login <provider>` on the multi-field account path.
+		// Pass apiKey only for ambient request auth when no /login credential exists
+		// (config file / env / `/cliproxyapi`). Never pass both for /login flows.
 		oauth,
-		// apiKey is optional when oauth is present; include it when known for direct use.
 		...(apiKey ? { apiKey } : {}),
 		...(models && models.length > 0 ? { models } : {}),
 	});
@@ -409,6 +423,9 @@ function createSetupCommandsController(options: {
 					streamSimple,
 					setupCommands,
 					fastMode,
+					// Dedicated command does not write auth.json; keep ambient apiKey
+					// so requests work in the current session.
+					registerConfiguredApiKey: true,
 				});
 
 				logInfo(`command setup ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
@@ -597,11 +614,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	try {
 		const loaded = await loadMappedModels(connection.baseUrlInput, connection.apiKey);
 		fastMode.setSupportedModelIds(loaded.fastModelIds);
+		// Prefer OAuth-only registration when /login already stored credentials so
+		// `/login <provider>` jumps straight into the multi-field flow. Fall back to
+		// ambient apiKey only for config-file / env setups without auth.json.
+		const hasStoredLogin = Boolean(loadAuthConnection(agentDir, identity.providerId)?.apiKey);
 		registerProvider(pi, {
 			providerId: identity.providerId,
 			providerName: identity.providerName,
 			baseUrlInput: connection.baseUrlInput,
-			apiKey: connection.apiKey,
+			apiKey: hasStoredLogin ? undefined : connection.apiKey,
 			models: loaded.models,
 			defaultBaseUrl,
 			agentDir,

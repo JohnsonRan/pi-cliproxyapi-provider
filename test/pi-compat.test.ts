@@ -28,6 +28,7 @@ describe("pi 0.80.9 compatibility", () => {
 			registerCommand: vi.fn((name: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]) => {
 				commands.set(name, options);
 			}),
+			unregisterProvider: vi.fn(),
 			registerProvider: vi.fn(),
 			on: vi.fn((event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -54,10 +55,18 @@ describe("pi 0.80.9 compatibility", () => {
 
 			expect([...commands.keys()]).toEqual(expect.arrayContaining(["cliproxyapi", "fast"]));
 			expect(commands.has("cpa")).toBe(false);
+			expect(pi.unregisterProvider).toHaveBeenCalledWith("cliproxyapi");
 			expect(pi.registerProvider).toHaveBeenCalledWith(
 				"cliproxyapi",
-				expect.objectContaining({ name: "CLIProxyAPI" }),
+				expect.objectContaining({
+					name: "CLIProxyAPI",
+					oauth: expect.any(Object),
+				}),
 			);
+			// OAuth-only registration keeps `/login cliproxyapi` off the API-key selector.
+			for (const [, config] of (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls) {
+				expect(config).not.toHaveProperty("apiKey");
+			}
 
 			const input = vi
 				.fn<ExtensionCommandContext["ui"]["input"]>()
@@ -81,6 +90,11 @@ describe("pi 0.80.9 compatibility", () => {
 				expect.objectContaining({ baseUrl: "http://127.0.0.1:8317", apiKey: "new-key" }),
 			);
 			expect(notify).toHaveBeenCalledWith(expect.stringContaining("CLIProxyAPI configured"), "info");
+			// Dedicated command may register ambient apiKey for request auth, but only after setup.
+			const postSetupConfigs = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls.map(
+				([, config]) => config as { apiKey?: string },
+			);
+			expect(postSetupConfigs.some((config) => config.apiKey === "new-key")).toBe(true);
 
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),

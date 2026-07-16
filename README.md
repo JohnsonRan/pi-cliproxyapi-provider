@@ -49,6 +49,8 @@ or:
 /login cliproxyapi
 ```
 
+These shortcuts jump straight into CLIProxyAPI's multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
+
 ### Menu path
 
 ```text

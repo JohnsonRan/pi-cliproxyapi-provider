@@ -18,7 +18,7 @@ export const CONFIG_FILE_NAME = "cliproxyapi.json";
 export const AUTH_FILE_NAME = "auth.json";
 export const CLIENT_VERSION = "pi";
 
-/** Keep login credentials effectively permanent; reconfigure via /cliproxyapi or /login. */
+/** Keep login credentials effectively permanent; reconfigure via /login. */
 export const CREDENTIAL_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
 
 export const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
@@ -387,7 +387,7 @@ export function toPiModel(model: CodexClientModel): PiProviderModel | null {
 	};
 }
 
-/** HTTP error from /v1/models (used to detect 401 and keep the setup command available). */
+/** HTTP error from /v1/models (used to detect 401). */
 export class ModelsHttpError extends Error {
 	readonly status: number;
 	readonly statusText: string;

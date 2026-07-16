@@ -75,7 +75,7 @@ async function runSessionStart(
 }
 
 describe("pi 0.80.9 compatibility", () => {
-	it("starts with the current ModelRegistry facade and keeps the setup command available when not logged in", async () => {
+	it("shows /cliproxyapi when unconfigured and hides it after successful setup", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
 			const { pi, handlers, autocompleteWrappers } = createPiMock(commands);
@@ -102,7 +102,6 @@ describe("pi 0.80.9 compatibility", () => {
 						oauth: expect.any(Object),
 					}),
 				);
-				// OAuth-only registration keeps `/login cliproxyapi` off the API-key selector.
 				for (const [, config] of (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls) {
 					expect(config).not.toHaveProperty("apiKey");
 				}
@@ -124,48 +123,42 @@ describe("pi 0.80.9 compatibility", () => {
 				await setupCommand.handler("", commandCtx);
 
 				expect(fetchMock).toHaveBeenCalledOnce();
-				expect(commands.has("cliproxyapi")).toBe(true);
-				expect(commands.has("cpa")).toBe(false);
 				expect(loadConfigFile(agentDir)).toEqual(
 					expect.objectContaining({ baseUrl: "http://127.0.0.1:8317", apiKey: "new-key" }),
 				);
 				expect(notify).toHaveBeenCalledWith(expect.stringContaining("CLIProxyAPI configured"), "info");
-				// Dedicated command may register ambient apiKey for request auth, but only after setup.
+				// Successful setup hides the dedicated command.
+				expect(commands.has("cliproxyapi")).toBe(false);
+
 				const postSetupConfigs = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls.map(
 					([, config]) => config as { apiKey?: string },
 				);
 				expect(postSetupConfigs.some((config) => config.apiKey === "new-key")).toBe(true);
 
-				writeFileSync(
-					join(agentDir, AUTH_FILE_NAME),
-					JSON.stringify({
-						cliproxyapi: {
-							type: "oauth",
-							access: "stored-key",
-							refresh: JSON.stringify({ baseUrl: "http://127.0.0.1:8317" }),
-							expires: Date.now() + 60_000,
-						},
-					}),
-					"utf8",
-				);
-				input.mockClear();
-				notify.mockClear();
-				fetchMock.mockClear();
-
-				await setupCommand.handler("", commandCtx);
-
-				expect(input).not.toHaveBeenCalled();
-				expect(fetchMock).not.toHaveBeenCalled();
-				expect(notify).toHaveBeenCalledWith(expect.stringContaining("run /logout before /cliproxyapi"), "error");
-				// Handler hides the command once /login credentials are detected.
-				expect(commands.has("cliproxyapi")).toBe(false);
+				const baseProvider = {
+					async getSuggestions() {
+						return {
+							items: [
+								{ value: "cliproxyapi", label: "cliproxyapi", description: "setup" },
+								{ value: "fast", label: "fast", description: "toggle" },
+							],
+							prefix: "/",
+						};
+					},
+					applyCompletion() {
+						return { lines: [""], cursorLine: 0, cursorCol: 0 };
+					},
+				};
+				const wrapped = autocompleteWrappers[0](baseProvider) as typeof baseProvider;
+				const suggestions = await wrapped.getSuggestions();
+				expect(suggestions?.items.map((item) => item.value)).toEqual(["fast"]);
 			} finally {
 				fetchMock.mockRestore();
 			}
 		});
 	});
 
-	it("hides /cliproxyapi when already logged in and filters it from autocomplete", async () => {
+	it("hides /cliproxyapi when already configured and restores it only after credentials are cleared", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),
@@ -197,7 +190,7 @@ describe("pi 0.80.9 compatibility", () => {
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 
-				// Already authenticated via /login → dedicated setup command stays hidden.
+				// Already configured → dedicated setup command stays hidden.
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(commands.has("fast")).toBe(true);
 
@@ -222,7 +215,7 @@ describe("pi 0.80.9 compatibility", () => {
 				const suggestions = await wrapped.getSuggestions();
 				expect(suggestions?.items.map((item) => item.value)).toEqual(["fast"]);
 
-				// Simulate /logout by clearing auth.json, then an input event should re-show the command.
+				// Clearing only auth.json is not enough while cliproxyapi.json still provides credentials.
 				writeFileSync(join(agentDir, AUTH_FILE_NAME), "{}\n", "utf8");
 				const sessionCtx = {
 					mode: "print",
@@ -231,11 +224,67 @@ describe("pi 0.80.9 compatibility", () => {
 				for (const handler of handlers.get("input") ?? []) {
 					await handler({ type: "input", text: "hello" }, sessionCtx);
 				}
+				expect(commands.has("cliproxyapi")).toBe(false);
 
+				// Clear config too → command returns.
+				writeFileSync(join(agentDir, "cliproxyapi.json"), "{}\n", "utf8");
+				for (const handler of handlers.get("input") ?? []) {
+					await handler({ type: "input", text: "hello again" }, sessionCtx);
+				}
 				expect(commands.has("cliproxyapi")).toBe(true);
 
-				const afterLogout = await wrapped.getSuggestions();
-				expect(afterLogout?.items.map((item) => item.value)).toEqual(["cliproxyapi", "fast"]);
+				const afterClear = await wrapped.getSuggestions();
+				expect(afterClear?.items.map((item) => item.value)).toEqual(["cliproxyapi", "fast"]);
+			} finally {
+				fetchMock.mockRestore();
+			}
+		});
+	});
+
+	it("blocks /cliproxyapi while /login credentials remain even if the command is forced", async () => {
+		await withTempAgentDir(async (agentDir) => {
+			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
+			const { pi, handlers, autocompleteWrappers } = createPiMock(commands);
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+
+			try {
+				await expect(providerExtension(pi)).resolves.toBeUndefined();
+				await runSessionStart(handlers, autocompleteWrappers);
+
+				const setupCommand = commands.get("cliproxyapi");
+				if (!setupCommand) throw new Error("/cliproxyapi was not registered");
+
+				writeFileSync(
+					join(agentDir, AUTH_FILE_NAME),
+					JSON.stringify({
+						cliproxyapi: {
+							type: "oauth",
+							access: "stored-key",
+							refresh: JSON.stringify({ baseUrl: "http://127.0.0.1:8317" }),
+							expires: Date.now() + 60_000,
+						},
+					}),
+					"utf8",
+				);
+
+				const input = vi.fn<ExtensionCommandContext["ui"]["input"]>();
+				const notify = vi.fn<ExtensionCommandContext["ui"]["notify"]>();
+				const commandCtx = {
+					hasUI: true,
+					modelRegistry: {},
+					ui: { input, notify },
+				} as unknown as ExtensionCommandContext;
+
+				await setupCommand.handler("", commandCtx);
+
+				expect(input).not.toHaveBeenCalled();
+				expect(notify).toHaveBeenCalledWith(expect.stringContaining("run /logout before /cliproxyapi"), "error");
+				expect(commands.has("cliproxyapi")).toBe(false);
 			} finally {
 				fetchMock.mockRestore();
 			}

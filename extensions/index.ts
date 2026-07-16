@@ -6,7 +6,7 @@
  *    skip the API-key vs account selector and go straight to multi-field prompts
  *    (pi only supports multi-field prompts on the account/OAuth path).
  * 2. Preferred shortcuts: `/login CLIProxyAPI`, `/login cliproxyapi`,
- *    or the dedicated `/cliproxyapi` command (hidden after successful /login).
+ *    or the dedicated `/cliproxyapi` command (hidden once configured).
  * 3. Setup prompts for baseUrl + apiKey.
  * 4. Final login step validates credentials via /v1/models?client_version=pi
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
@@ -53,15 +53,26 @@ interface SetupCommandsController {
 	show(): void;
 	hide(): void;
 	isVisible(): boolean;
-	/** Hide when /login credentials exist; show otherwise. */
-	syncFromAuth(): void;
-	/** Whether /login currently has a stored credential for this provider. */
-	hasLoginCredential(): boolean;
+	/**
+	 * Hide when CLIProxyAPI is already configured (env / cliproxyapi.json / auth.json).
+	 * Show when no connection is available. Pass forceShow after 401 so the user can fix credentials.
+	 */
+	syncVisibility(options?: { forceShow?: boolean }): void;
+	/** Whether any connection source currently provides credentials. */
+	isConfigured(): boolean;
 }
 
 function hasLoginCredential(agentDir: string, providerId: string): boolean {
 	try {
 		return Boolean(loadAuthConnection(agentDir, providerId)?.apiKey);
+	} catch {
+		return false;
+	}
+}
+
+function isProviderConfigured(agentDir: string, providerId: string): boolean {
+	try {
+		return resolveConnection(agentDir, providerId) !== null;
 	} catch {
 		return false;
 	}
@@ -247,7 +258,7 @@ function createOAuthHandlers(options: {
 						fastMode,
 					});
 
-					// /login succeeded — dedicated setup is unnecessary until logout.
+					// /login succeeded — dedicated setup is unnecessary until config is cleared.
 					setupCommands.hide();
 					logInfo(`login ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
 					return buildOAuthCredentials(baseUrlInput, apiKey);
@@ -260,7 +271,7 @@ function createOAuthHandlers(options: {
 					}
 					// Auth failures should keep the setup command available for reconfiguration.
 					if (isUnauthorizedModelsError(error)) {
-						setupCommands.show();
+						setupCommands.syncVisibility({ forceShow: true });
 					}
 					callbacks.onProgress?.(`Login validation failed: ${message}\nPlease re-enter base URL and API key.`);
 					// Keep last baseUrl as the next default so retyping is easier.
@@ -384,10 +395,10 @@ function createSetupCommandsController(options: {
 		isVisible() {
 			return false;
 		},
-		syncFromAuth() {
+		syncVisibility() {
 			/* replaced below */
 		},
-		hasLoginCredential() {
+		isConfigured() {
 			return false;
 		},
 	};
@@ -465,6 +476,8 @@ function createSetupCommandsController(options: {
 					registerConfiguredApiKey: true,
 				});
 
+				// Config saved — hide dedicated setup until credentials are cleared.
+				setupCommands.hide();
 				logInfo(`command setup ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
 				ctx.ui.notify(`CLIProxyAPI configured: ${result.modelCount} models from ${result.modelsUrl}`, "info");
 				return;
@@ -476,7 +489,7 @@ function createSetupCommandsController(options: {
 					return;
 				}
 				if (isUnauthorizedModelsError(error)) {
-					setupCommands.show();
+					setupCommands.syncVisibility({ forceShow: true });
 				}
 				ctx.ui.notify(`CLIProxyAPI validation failed: ${message}. Please re-enter base URL and API key.`, "error");
 			}
@@ -567,15 +580,19 @@ function createSetupCommandsController(options: {
 		}
 		commandMap.delete("cliproxyapi");
 		visible = false;
-		logInfo("setup command hidden (CLIProxyAPI already authenticated via /login)");
+		logInfo("setup command hidden (CLIProxyAPI already configured)");
 	};
 
 	setupCommands.isVisible = (): boolean => visible;
 
-	setupCommands.hasLoginCredential = (): boolean => hasLoginCredential(agentDir, providerId);
+	setupCommands.isConfigured = (): boolean => isProviderConfigured(agentDir, providerId);
 
-	setupCommands.syncFromAuth = (): void => {
-		if (hasLoginCredential(agentDir, providerId)) {
+	setupCommands.syncVisibility = (options?: { forceShow?: boolean }): void => {
+		if (options?.forceShow) {
+			setupCommands.show();
+			return;
+		}
+		if (isProviderConfigured(agentDir, providerId)) {
 			setupCommands.hide();
 		} else {
 			setupCommands.show();
@@ -588,7 +605,7 @@ function createSetupCommandsController(options: {
 /**
  * pi's slash autocomplete snapshots commands at setup time. Deleting from the
  * extension command Map alone does not refresh that snapshot, so also filter
- * `/cliproxyapi` out of live suggestions while a /login credential exists.
+ * `/cliproxyapi` out of live suggestions while the provider is configured.
  */
 function installSetupCommandAutocompleteFilter(options: {
 	pi: ExtensionAPI;
@@ -600,7 +617,7 @@ function installSetupCommandAutocompleteFilter(options: {
 	let installed = false;
 
 	pi.on("session_start", (_event, ctx) => {
-		setupCommands.syncFromAuth();
+		setupCommands.syncVisibility();
 
 		if (installed) {
 			return;
@@ -616,10 +633,10 @@ function installSetupCommandAutocompleteFilter(options: {
 			applyCompletion: current.applyCompletion.bind(current),
 			async getSuggestions(lines, cursorLine, cursorCol, suggestionOptions) {
 				// Keep Map visibility in sync when the user opens `/`.
-				setupCommands.syncFromAuth();
+				setupCommands.syncVisibility();
 
 				const result = await current.getSuggestions(lines, cursorLine, cursorCol, suggestionOptions);
-				if (!result?.items?.length || !hasLoginCredential(agentDir, providerId)) {
+				if (!result?.items?.length || !isProviderConfigured(agentDir, providerId)) {
 					return result;
 				}
 
@@ -630,7 +647,7 @@ function installSetupCommandAutocompleteFilter(options: {
 				return { ...result, items };
 			},
 		}));
-		logInfo("installed /cliproxyapi autocomplete filter for logged-in sessions");
+		logInfo("installed /cliproxyapi autocomplete filter for configured sessions");
 	});
 }
 
@@ -723,11 +740,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		fastMode,
 	});
 
-	// Reconcile Map visibility + autocomplete filtering when auth changes.
+	// Reconcile Map visibility + autocomplete filtering when configuration changes.
 	// pi has no logout extension event and slash autocomplete is snapshotted, so we:
 	// 1) delete/re-add the command Map entry
-	// 2) filter suggestions live while a /login credential exists
-	// 3) re-check on submitted input after /logout
+	// 2) filter suggestions live while any connection source is configured
+	// 3) re-check on submitted input after /logout or config edits
 	installSetupCommandAutocompleteFilter({
 		pi,
 		agentDir,
@@ -735,13 +752,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		setupCommands,
 	});
 	pi.on("input", () => {
-		setupCommands.syncFromAuth();
+		setupCommands.syncVisibility();
 	});
 
-	// Initial visibility: hide when already logged in via /login.
-	setupCommands.syncFromAuth();
-	if (setupCommands.hasLoginCredential()) {
-		logInfo("CLIProxyAPI already authenticated via /login; /cliproxyapi stays hidden");
+	// Initial visibility: hide when already configured via env / config / /login.
+	setupCommands.syncVisibility();
+	if (setupCommands.isConfigured()) {
+		logInfo("CLIProxyAPI already configured; /cliproxyapi stays hidden");
 	}
 
 	// Always register oauth so the provider is visible in /login immediately after install.
@@ -758,7 +775,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	const connection = resolveConnection(agentDir, identity.providerId);
 	if (!connection) {
-		setupCommands.syncFromAuth();
+		setupCommands.syncVisibility();
 		logInfo(
 			`not configured yet. Prefer /cliproxyapi or /login ${identity.providerName}. ` +
 				`Menu path: /login → Sign in with an account → ${identity.providerName}. ` +
@@ -773,7 +790,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// Prefer OAuth-only registration when /login already stored credentials so
 		// `/login <provider>` jumps straight into the multi-field flow. Fall back to
 		// ambient apiKey only for config-file / env setups without auth.json.
-		const hasStoredLogin = Boolean(loadAuthConnection(agentDir, identity.providerId)?.apiKey);
+		const hasStoredLogin = hasLoginCredential(agentDir, identity.providerId);
 		registerProvider(pi, {
 			providerId: identity.providerId,
 			providerName: identity.providerName,
@@ -786,26 +803,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			setupCommands,
 			fastMode,
 		});
-		// Keep /cliproxyapi hidden when authenticated via /login; show for config-only setups.
-		setupCommands.syncFromAuth();
+		// Configured successfully — keep /cliproxyapi hidden.
+		setupCommands.hide();
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (isUnauthorizedModelsError(error)) {
-			// 401 → prefer /login when auth.json still has a credential; otherwise show setup.
-			setupCommands.syncFromAuth();
-			logWarn(
-				`models request unauthorized (${message}). ` +
-					(setupCommands.isVisible()
-						? "Setup command available: /cliproxyapi."
-						: `Use /login ${identity.providerName} or /logout then /cliproxyapi.`),
-			);
+			// 401 → show setup so the user can fix baseUrl/key.
+			setupCommands.syncVisibility({ forceShow: true });
+			logWarn(`models request unauthorized (${message}). Setup command available: /cliproxyapi or /login.`);
 		} else {
-			// Other failures (network, etc.): still offer setup when not logged in via /login.
-			setupCommands.syncFromAuth();
+			// Other failures (network, etc.): still offer setup for reconfiguration.
+			setupCommands.syncVisibility({ forceShow: true });
 			logWarn(
-				`failed to load models (${message}). Provider remains available via ` +
-					(setupCommands.isVisible() ? "/cliproxyapi or " : "") +
-					`/login for reconfiguration.`,
+				`failed to load models (${message}). Provider remains available via /cliproxyapi or /login for reconfiguration.`,
 			);
 		}
 	}

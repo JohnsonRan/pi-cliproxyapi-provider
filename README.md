@@ -35,7 +35,7 @@ This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only s
 /cliproxyapi
 ```
 
-This slash command is shown only when CLIProxyAPI is **not** already authenticated via `/login` (no matching credential in `auth.json`). After a successful `/login`, it is removed from the command registry and filtered out of `/` autocomplete; reconfigure with `/login CLIProxyAPI`, or run `/logout` first to bring `/cliproxyapi` back. Config-file / env-only setups (no `/login` credential) keep the command available for reconfiguration. Restart pi or run `/reload` after upgrading so the new visibility logic is loaded.
+This slash command is shown only when CLIProxyAPI is **not yet configured** (no usable credentials from env, `cliproxyapi.json`, or `/login` auth). After a successful `/login` or `/cliproxyapi` setup, it is removed from the command registry and filtered out of `/` autocomplete. Reconfigure with `/login CLIProxyAPI`, or clear credentials (`/logout` and/or remove `cliproxyapi.json` / env) to bring `/cliproxyapi` back. Restart pi or run `/reload` after upgrading so the new visibility logic is loaded.
 
 ### Or use /login shortcuts (skip the menu)
 
@@ -189,14 +189,12 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 ## Failure behavior
 
 - Before setup / without credentials: provider still appears in `/login`; `/cliproxyapi` is shown; no models are listed yet.
-- After successful `/login`: `/cliproxyapi` is hidden; reconfigure via `/login CLIProxyAPI`.
-- After successful `/cliproxyapi` (config-only, no `auth.json` login): `/cliproxyapi` stays available for reconfiguration.
+- After successful `/login` or `/cliproxyapi`: `/cliproxyapi` is hidden; reconfigure via `/login CLIProxyAPI` or by clearing stored credentials/config.
 - If an `auth.json` credential exists and `/cliproxyapi` is invoked somehow, it asks you to use `/login CLIProxyAPI` or run `/logout` first so the old credential cannot override the new key.
-- The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged. After logout, `/cliproxyapi` is shown again (on the next submitted input or session start).
-- If a models request returns **HTTP 401** and no `/login` credential remains, the setup command is shown for reconfiguration; otherwise use `/login`.
-- If CPA is unreachable during startup (non-401), a warning is logged; setup stays available via `/cliproxyapi` (when not logged in) or `/login`.
+- The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged. `/cliproxyapi` reappears only when no connection source remains (after logout **and** config/env are cleared), or when model loading fails with a reconfiguration prompt.
+- If a models request returns **HTTP 401** or CPA is unreachable during startup, `/cliproxyapi` is shown again so credentials can be fixed.
 - Login/setup final step validates credentials by requesting models:
-  - HTTP 200 (including empty catalog) → credentials are persisted; `/login` hides `/cliproxyapi`
+  - HTTP 200 (including empty catalog) → credentials are persisted; `/cliproxyapi` is hidden
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key
 - If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run setup later after models become available.
 - If the selected model does not provide a non-empty `service_tiers` array: the request is left unchanged; `/fast` still updates the global preference and warns when enabling it.

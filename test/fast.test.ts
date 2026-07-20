@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyFastPayloadHook,
 	type CliproxyCodexStreamSimple,
+	patchCodexSource,
 	withPriorityServiceTier,
 	wrapStreamSimpleForFast,
 } from "../extensions/codex-stream.ts";
@@ -15,6 +17,27 @@ const model = {
 	id: "gpt-5.4",
 	provider: "cliproxyapi",
 } as Model<Api>;
+
+describe("Codex WebSocket transport patch", () => {
+	it("reconnects WebSocket instead of falling back to SSE", () => {
+		const source = readFileSync(
+			new URL("../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js", import.meta.url),
+			"utf8",
+		);
+		const patched = patchCodexSource(source, ["cliproxyapi"]);
+
+		expect(patched).toContain("const websocketDisabledForSession = false;");
+		expect(patched).toContain("let websocketRetries = 0;");
+		expect(patched).toContain("const connectionLimitBeforeStart = !websocketStarted");
+		expect(patched).toContain("isCodexNonTransportError(error) && !connectionLimitBeforeStart");
+		expect(patched).toContain("const maxWebSocketRetries = Number.isFinite(options?.maxRetries)");
+		expect(patched).toContain("? Math.min(Math.max(0, Math.floor(options.maxRetries)), 5)");
+		expect(patched).toContain(": 3;");
+		expect(patched).not.toContain('fallbackTransport: websocketStarted ? undefined : "sse",');
+		expect(patched).not.toContain("websocketSseFallbackSessions.add(sessionId);");
+		expect(patched).not.toContain("recordWebSocketSseFallback(options?.sessionId);\n                        break;");
+	});
+});
 
 describe("FastModeController", () => {
 	it("combines the global preference with model capability", () => {

@@ -10,7 +10,8 @@ Pi provider extension that discovers models from [CLIProxyAPI](https://github.co
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
 5. Registers inference against `{root}/backend-api/`.
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
-7. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
+7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json` with a 24-hour TTL and provides `/cliproxyapi-refresh` to force a refresh.
+8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 
 ## Install
 
@@ -58,9 +59,9 @@ Then choose:
    - base URL — preferred form is host:port, e.g. `http://127.0.0.1:8317`
    - API key
 
-Final login validation calls `{root}/v1/models?client_version=pi`:
+Final login validation calls `{root}/v1/models?client_version=pi` (this always bypasses the model cache and forces a fresh remote query):
 
-- **HTTP 200** → login succeeds (empty model list is still OK)
+- **HTTP 200** → login succeeds (empty model list is still OK) and the model cache is rewritten
 - **non-200 / network error** → login fails and you are prompted to re-enter base URL + API key
 
 On success:
@@ -145,6 +146,39 @@ When Fast is effective, pi's model status appends a yellow lowercase `fast`, for
 
 Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast injects `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level.
 
+## Model cache
+
+The provider keeps a separate cache file so startup stays fast when CLIProxyAPI is slow or briefly unreachable:
+
+`~/.pi/agent/cliproxyapi-models.json`
+
+The cache stores only model metadata and derived endpoint URLs — the model list, Fast-capable IDs, `inferenceBaseUrl`, `modelsUrl`, and a `fetchedAt` timestamp. It **never** stores your API key or other credentials.
+
+| Property | Value |
+|----------|-------|
+| Cache file | `~/.pi/agent/cliproxyapi-models.json` |
+| TTL | 24 hours |
+| Remote query timeout | 3 seconds |
+| Scope | tied to the current `baseUrl` (a different base URL ignores the existing cache) |
+
+### Startup / resume behavior
+
+When the provider loads (including session resume):
+
+1. If a **fresh** cache exists (age < 24 h) for the configured `baseUrl`, models are registered immediately from the cache and **no remote request is made** — startup stays fully offline.
+2. Otherwise (cache missing, stale, or scoped to a different `baseUrl`), a remote query to `{root}/v1/models?client_version=pi` is attempted with a 3-second timeout.
+   - On success, the cache is rewritten and the freshly fetched models are registered.
+   - On failure (network error, non-200, or timeout), the provider falls back to the stale cache if one exists (even if expired) and registers those models. If no cache is available, startup behaves as before: a warning is logged and no models are registered until the proxy responds.
+
+Use `/cliproxyapi-refresh` to refresh a fresh cache on demand.
+
+### Refresh commands
+
+- `/cliproxyapi-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
+- `/login CLIProxyAPI` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
+
+Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
+
 ## Model mapping
 
 From CPA catalog entry → pi model:
@@ -183,7 +217,7 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
 - After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `cliproxyapi.json`.
 - The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged.
-- If a models request returns **HTTP 401** or CPA is unreachable during startup, a warning is logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
+- If a models request returns **HTTP 401** or CPA is unreachable during startup, the provider falls back to the cached catalog if one exists (even stale). Only when no cache is available is a warning logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key

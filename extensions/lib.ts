@@ -15,8 +15,11 @@ export const DEFAULT_PROVIDER_ID = "cliproxyapi";
 export const DEFAULT_PROVIDER_NAME = "CLIProxyAPI";
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 export const CONFIG_FILE_NAME = "cliproxyapi.json";
+export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
 export const AUTH_FILE_NAME = "auth.json";
 export const CLIENT_VERSION = "pi";
+export const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+export const MODELS_REQUEST_TIMEOUT_MS = 3000;
 
 /** Keep login credentials effectively permanent; reconfigure via /login. */
 export const CREDENTIAL_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
@@ -88,6 +91,17 @@ export interface PiProviderModel {
 	contextWindow: number;
 	maxTokens: number;
 	thinkingLevelMap?: ThinkingLevelMap;
+}
+
+export interface MappedModels {
+	models: PiProviderModel[];
+	fastModelIds: string[];
+	inferenceBaseUrl: string;
+	modelsUrl: string;
+}
+
+export interface ModelsCacheFile extends MappedModels {
+	fetchedAt: number;
 }
 
 export interface OAuthRefreshMeta {
@@ -197,6 +211,36 @@ export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): vo
 		...config,
 	};
 	writeFileSync(configPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
+export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsCacheFile | null {
+	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
+	try {
+		const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<ModelsCacheFile>;
+		const endpoints = resolveEndpoints(baseUrlInput);
+		if (
+			typeof parsed.fetchedAt !== "number" ||
+			parsed.modelsUrl !== endpoints.modelsUrl ||
+			parsed.inferenceBaseUrl !== endpoints.inferenceBaseUrl ||
+			!Array.isArray(parsed.models) ||
+			!Array.isArray(parsed.fastModelIds)
+		) {
+			return null;
+		}
+		return parsed as ModelsCacheFile;
+	} catch {
+		return null;
+	}
+}
+
+export function isModelsCacheFresh(cache: ModelsCacheFile, now = Date.now()): boolean {
+	return now - cache.fetchedAt < MODELS_CACHE_TTL_MS;
+}
+
+export function saveModelsCache(agentDir: string, loaded: MappedModels, fetchedAt = Date.now()): void {
+	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
+	mkdirSync(dirname(cachePath), { recursive: true });
+	writeFileSync(cachePath, `${JSON.stringify({ ...loaded, fetchedAt }, null, 2)}\n`, "utf8");
 }
 
 export function loadAuthConnection(agentDir: string, providerId: string): { baseUrl?: string; apiKey?: string } | null {
@@ -404,12 +448,17 @@ export function isUnauthorizedModelsError(error: unknown): boolean {
 	return error instanceof ModelsHttpError && error.status === 401;
 }
 
-export async function fetchCodexModels(modelsUrl: string, apiKey: string): Promise<CodexClientModel[]> {
+export async function fetchCodexModels(
+	modelsUrl: string,
+	apiKey: string,
+	timeoutMs = MODELS_REQUEST_TIMEOUT_MS,
+): Promise<CodexClientModel[]> {
 	const response = await fetch(modelsUrl, {
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
 			Accept: "application/json",
 		},
+		signal: AbortSignal.timeout(timeoutMs),
 	});
 
 	// Login validation only requires HTTP 200; non-2xx means credentials/baseUrl failed.
@@ -441,12 +490,19 @@ export async function fetchCodexModels(modelsUrl: string, apiKey: string): Promi
 	return [];
 }
 
+export interface ResolvedModelsResult {
+	loaded: MappedModels;
+	fromCache: boolean;
+	stale?: boolean;
+}
+
 export async function loadMappedModels(
 	baseUrlInput: string,
 	apiKey: string,
-): Promise<{ models: PiProviderModel[]; fastModelIds: string[]; inferenceBaseUrl: string; modelsUrl: string }> {
+	timeoutMs = MODELS_REQUEST_TIMEOUT_MS,
+): Promise<MappedModels> {
 	const endpoints = resolveEndpoints(baseUrlInput);
-	const remoteModels = await fetchCodexModels(endpoints.modelsUrl, apiKey);
+	const remoteModels = await fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs);
 	const models = remoteModels.map(toPiModel).filter((model): model is PiProviderModel => model !== null);
 	const fastModelIds = Array.from(
 		new Set(
@@ -464,4 +520,37 @@ export async function loadMappedModels(
 		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
 	};
+}
+
+/**
+ * Load mapped models from fresh cache, or fetch remotely and update the cache.
+ * When the remote fetch fails and a stale cache exists, the stale cache is
+ * returned so the provider can keep working offline.
+ */
+export async function resolveMappedModels(
+	agentDir: string,
+	baseUrlInput: string,
+	apiKey: string,
+	options: { forceRefresh?: boolean; timeoutMs?: number } = {},
+): Promise<ResolvedModelsResult> {
+	if (!options.forceRefresh) {
+		const cache = loadModelsCache(agentDir, baseUrlInput);
+		if (cache && isModelsCacheFresh(cache)) {
+			return { loaded: cache, fromCache: true };
+		}
+	}
+
+	try {
+		const loaded = await loadMappedModels(baseUrlInput, apiKey, options.timeoutMs);
+		saveModelsCache(agentDir, loaded);
+		return { loaded, fromCache: false };
+	} catch (error) {
+		if (!options.forceRefresh) {
+			const staleCache = loadModelsCache(agentDir, baseUrlInput);
+			if (staleCache) {
+				return { loaded: staleCache, fromCache: true, stale: true };
+			}
+		}
+		throw error;
+	}
 }

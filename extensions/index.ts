@@ -474,18 +474,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 		fastMode.setSupportedModelIds(loaded.fastModelIds);
 
-		if (fromCache) {
-			if (stale) {
-				const fetchedAt = (loaded as ModelsCacheFile).fetchedAt;
-				logWarn(
-					`using stale model cache from ${new Date(fetchedAt).toISOString()}; ` +
-						`use /cliproxyapi-refresh to update.`,
-				);
-			} else {
-				logInfo(`using fresh model cache (${loaded.models.length} models)`);
-			}
-		} else {
-			logInfo(`fetched ${loaded.models.length} models from ${loaded.modelsUrl}`);
+		if (fromCache && stale) {
+			const fetchedAt = (loaded as ModelsCacheFile).fetchedAt;
+			logWarn(
+				`using stale model cache from ${new Date(fetchedAt).toISOString()}; ` +
+					`use /cliproxyapi-refresh to update.`,
+			);
 		}
 
 		// Prefer OAuth-only registration when /login already stored credentials so

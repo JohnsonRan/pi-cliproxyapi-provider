@@ -20,6 +20,7 @@
 
 import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { ProactiveCompactionController } from "./auto-compact.ts";
 import { CLIPROXYAPI_CODEX_API, type CliproxyCodexStreamSimple, loadCliproxyCodexStreams } from "./codex-stream.ts";
 import { FastModeController } from "./fast.ts";
 import { FastFooterController } from "./fast-footer.ts";
@@ -347,6 +348,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const agentDir = getAgentDir();
 	const identity = resolveIdentity(agentDir);
 	const defaultBaseUrl = resolveDefaultBaseUrl(agentDir, identity.providerId);
+	const proactiveCompaction = new ProactiveCompactionController(agentDir, identity.providerId);
+	proactiveCompaction.register(pi);
 
 	let fastEnabled = false;
 	try {
@@ -362,14 +365,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const streams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"], {
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 		});
-		streamSimple = streams.streamSimple;
+		streamSimple = proactiveCompaction.wrapStreamSimple(streams.streamSimple);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		logWarn(`failed to load patched codex protocol: ${message}`);
 		return;
 	}
 
-	const fastFooter = new FastFooterController(identity.providerId, fastMode);
+	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
+		proactiveCompaction.getCompactionSettings(),
+	);
 	registerFastCommand({
 		pi,
 		agentDir,

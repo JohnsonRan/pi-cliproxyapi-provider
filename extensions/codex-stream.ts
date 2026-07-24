@@ -99,11 +99,16 @@ function rewriteRelativeImports(source: string, originalDir: string): string {
 }
 
 function patchWebSocketOnlyTransport(source: string): string {
-	const disabledForSession =
-		/const websocketDisabledForSession\s*=\s*transport !== "sse" && isWebSocketSseFallbackActive\(options\?\.sessionId\);/;
+	const sessionIdExpression = String.raw`(?:options\?\.sessionId|cacheSessionId)`;
+	const disabledForSession = new RegExp(
+		String.raw`const websocketDisabledForSession\s*=\s*transport !== "sse" && isWebSocketSseFallbackActive\(${sessionIdExpression}\);`,
+	);
 	const retryVariables = /let retriedWebSocketConnectionLimit\s*=\s*false;/;
-	const websocketFailureHandling =
-		/const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError\(error\);[\s\S]*?recordWebSocketSseFallback\(options\?\.sessionId\);\s*break;/;
+	const connectionLimitRetry =
+		/if \(!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit\) \{\s*retriedWebSocketConnectionLimit = true;\s*continue;\s*\}/;
+	const websocketFailureHandling = new RegExp(
+		String.raw`if \(aborted \|\| \(isCodexNonTransportError\(error\) && !connectionLimitBeforeStart\)\) \{[\s\S]*?recordWebSocketFailure\((${sessionIdExpression}), error\);[\s\S]*?recordWebSocketSseFallback\(\1\);\s*break;`,
+	);
 	const fallbackSessionRecord = "websocketSseFallbackSessions.add(sessionId);";
 	const fallbackActiveRecord = "stats.websocketFallbackActive = true;";
 
@@ -112,7 +117,7 @@ function patchWebSocketOnlyTransport(source: string): string {
 			throw new Error("openai-codex-responses source no longer supports the WebSocket-only transport patch");
 		}
 	}
-	for (const pattern of [disabledForSession, retryVariables, websocketFailureHandling]) {
+	for (const pattern of [disabledForSession, retryVariables, connectionLimitRetry, websocketFailureHandling]) {
 		if (!pattern.test(source)) {
 			throw new Error("openai-codex-responses source no longer supports the WebSocket-only transport patch");
 		}
@@ -127,10 +132,13 @@ function patchWebSocketOnlyTransport(source: string): string {
                     ? Math.min(Math.max(0, Math.floor(options.maxRetries)), 5)
                     : 3;`,
 		)
+		.replace(connectionLimitRetry, "")
 		.replace(
 			websocketFailureHandling,
-			`const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
-                        if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
+			(
+				_match,
+				activeSessionId: string,
+			) => `if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
                             throw error;
                         }
                         if (!websocketStarted && websocketRetries < maxWebSocketRetries) {
@@ -144,7 +152,7 @@ function patchWebSocketOnlyTransport(source: string): string {
                             phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
                             requestBytes: new TextEncoder().encode(bodyJson).byteLength,
                         }));
-                        recordWebSocketFailure(options?.sessionId, error);
+                        recordWebSocketFailure(${activeSessionId}, error);
                         throw error;`,
 		)
 		.replace(fallbackSessionRecord, "")

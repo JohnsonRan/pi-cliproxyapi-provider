@@ -55,7 +55,7 @@ function createPiMock(commands: Map<string, Parameters<ExtensionAPI["registerCom
 	return { pi, handlers };
 }
 
-describe("pi 0.80.9 compatibility", () => {
+describe("pi 0.82.0 compatibility", () => {
 	it("registers oauth login and /fast without a dedicated /cliproxyapi command", async () => {
 		await withTempAgentDir(async () => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();

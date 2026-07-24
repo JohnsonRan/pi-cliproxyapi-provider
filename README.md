@@ -11,6 +11,7 @@ Pi provider extension that discovers models from [CLIProxyAPI](https://github.co
 5. Registers inference against `{root}/backend-api/`.
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
 7. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
+8. Proactively ends over-threshold CLIProxyAPI tool turns so pi can compact and retry before a long tool chain fills the context window.
 
 ## Install
 
@@ -144,6 +145,34 @@ Each invocation switches Fast between on and off and writes the result to `~/.pi
 When Fast is effective, pi's model status appends a yellow lowercase `fast`, for example `gpt-5.6-sol • xhigh • fast`. When Fast is off or the selected model is unsupported, the original model status remains unchanged. Supported models do not produce a separate status notification. Running `/fast` with an unsupported model still updates the global preference; enabling it warns that the current model cannot use Fast.
 
 Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast injects `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level.
+
+## Proactive compaction during tool runs
+
+Pi normally checks its automatic compaction threshold after an agent run settles or before the next user prompt. A single agent run can contain many consecutive tool turns, so it may otherwise grow well beyond the configured threshold before pi gets another check opportunity.
+
+For CLIProxyAPI models, this package also checks each completed tool turn. It reloads pi's existing merged compaction settings from `~/.pi/agent/settings.json` and the trusted project `.pi/settings.json`. When all of the following are true:
+
+- `compaction.enabled` is `true`
+- the completed assistant response requested tools
+- reported context usage exceeds `contextWindow - compaction.reserveTokens`
+
+…the package schedules a recognized `context_length_exceeded` error instead of sending the next provider request. Pi's built-in overflow recovery then compacts the session and retries automatically. The current tool batch finishes before this check, so the package does not discard valid tool calls or repeat completed tool operations.
+
+No separate CLIProxyAPI setting is required. For example:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 65536,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+This only adds an earlier check point for the provider registered by this package. Summary generation, retained context, session persistence, and retry execution remain handled by pi.
+
+In the TUI footer, CLIProxyAPI context usage also uses this effective threshold as its denominator. With a `372000` model window and `reserveTokens: 65536`, the footer displays `/306k`; the percentage is recalculated against `306464`, so `100%` corresponds to the proactive compaction threshold rather than the model's absolute limit. Disabling automatic compaction restores the full model window display.
 
 ## Model mapping
 

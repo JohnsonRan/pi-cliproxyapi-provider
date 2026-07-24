@@ -42,6 +42,7 @@ import {
 	resolveIdentity,
 	saveConfigFile,
 } from "./lib.ts";
+import { registerTransientNetworkErrorRetry } from "./retry.ts";
 
 class ConfigPersistenceError extends Error {
 	constructor(cause: unknown) {
@@ -394,6 +395,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		streamSimple,
 		fastMode,
 	});
+	registerTransientNetworkErrorRetry(pi, identity.providerId);
 
 	const connection = resolveConnection(agentDir, identity.providerId);
 	if (!connection) {

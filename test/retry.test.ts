@@ -3,8 +3,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { describe, expect, it } from "vitest";
 import { normalizeTransientNetworkError, registerTransientNetworkErrorRetry } from "../extensions/retry.ts";
 
-const CLOSED_CONNECTION_ERROR =
-	"Codex error: read tcp 172.16.209.2:57303->172.64.155.209:443: use of closed network connection";
+const TRANSIENT_STREAM_ERRORS = [
+	"Codex error: read tcp 172.16.209.2:57303->172.64.155.209:443: use of closed network connection",
+	"Error: Codex error: stream error: stream disconnected before completion: stream closed before response.completed",
+	"Codex error: invalid SSE data JSON (len=33181)",
+];
 
 function assistantError(errorMessage: string, provider = "cliproxyapi"): AssistantMessage {
 	return {
@@ -28,13 +31,13 @@ function assistantError(errorMessage: string, provider = "cliproxyapi"): Assista
 }
 
 describe("transient network error normalization", () => {
-	it("makes CLIProxyAPI closed network connection errors retryable", () => {
-		const original = assistantError(CLOSED_CONNECTION_ERROR);
+	it.each(TRANSIENT_STREAM_ERRORS)("makes CLIProxyAPI transient stream error retryable: %s", (errorMessage) => {
+		const original = assistantError(errorMessage);
 		expect(isRetryableAssistantError(original)).toBe(false);
 
 		const normalized = normalizeTransientNetworkError(original);
 		expect(normalized).not.toBe(original);
-		expect(normalized.errorMessage).toBe(`network error: ${CLOSED_CONNECTION_ERROR}`);
+		expect(normalized.errorMessage).toBe(`network error: ${errorMessage}`);
 		expect(isRetryableAssistantError(normalized)).toBe(true);
 	});
 
@@ -56,13 +59,13 @@ describe("transient network error normalization", () => {
 		registerTransientNetworkErrorRetry(pi, "cliproxyapi");
 		if (!handler) throw new Error("message_end handler was not registered");
 
-		const matching = assistantError(CLOSED_CONNECTION_ERROR);
+		const matching = assistantError(TRANSIENT_STREAM_ERRORS[0]);
 		const replacement = handler({ type: "message_end", message: matching }, {} as ExtensionContext) as {
 			message: AssistantMessage;
 		};
-		expect(replacement.message.errorMessage).toBe(`network error: ${CLOSED_CONNECTION_ERROR}`);
+		expect(replacement.message.errorMessage).toBe(`network error: ${TRANSIENT_STREAM_ERRORS[0]}`);
 
-		const otherProvider = assistantError(CLOSED_CONNECTION_ERROR, "other");
+		const otherProvider = assistantError(TRANSIENT_STREAM_ERRORS[0], "other");
 		expect(handler({ type: "message_end", message: otherProvider }, {} as ExtensionContext)).toBeUndefined();
 	});
 });

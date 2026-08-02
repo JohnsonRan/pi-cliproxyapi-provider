@@ -139,7 +139,7 @@ async function configureAndRegister(options: {
 	defaultBaseUrl: string;
 	streamSimple: CliproxyCodexStreamSimple;
 	fastMode: FastModeController;
-	onFastModeChange?: () => Promise<void>;
+	onFastModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }): Promise<{ modelCount: number; modelsUrl: string }> {
 	const {
 		pi,
@@ -193,7 +193,7 @@ function createOAuthHandlers(options: {
 	defaultBaseUrl: string;
 	streamSimple: CliproxyCodexStreamSimple;
 	fastMode: FastModeController;
-	onFastModeChange?: () => Promise<void>;
+	onFastModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }) {
 	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode, onFastModeChange } = options;
 
@@ -282,7 +282,7 @@ function registerProvider(
 		agentDir: string;
 		streamSimple: CliproxyCodexStreamSimple;
 		fastMode: FastModeController;
-		onFastModeChange?: () => Promise<void>;
+		onFastModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 	},
 ): void {
 	const {
@@ -337,6 +337,7 @@ export function registerFastCommand(options: {
 	onModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }): void {
 	const { pi, agentDir, providerId, fastMode, onStatusChange, onModeChange } = options;
+	let modeChangeInProgress = false;
 
 	pi.registerCommand("fast", {
 		description: "Toggle CLIProxyAPI Fast mode globally.",
@@ -345,41 +346,62 @@ export function registerFastCommand(options: {
 				ctx.ui.notify("Usage: /fast", "error");
 				return;
 			}
-
-			const enabled = !fastMode.isEnabled();
-			try {
-				saveConfigFile(agentDir, { fast: enabled });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
+			if (modeChangeInProgress) {
+				ctx.ui.notify("Fast mode is already being refreshed. Try again when it finishes.", "warning");
 				return;
 			}
-			fastMode.setEnabled(enabled);
+
+			modeChangeInProgress = true;
 			try {
-				await onModeChange?.(enabled, ctx);
-			} catch (error) {
-				// Keep the registered model metadata and persisted preference in sync
-				// when a live provider refresh fails.
-				fastMode.setEnabled(!enabled);
+				const previousEnabled = fastMode.isEnabled();
+				const enabled = !previousEnabled;
 				try {
-					saveConfigFile(agentDir, { fast: !enabled });
-				} catch {
-					// The original save already succeeded; report the refresh failure below.
+					saveConfigFile(agentDir, { fast: enabled });
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
+					return;
 				}
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Failed to refresh model pricing: ${message}`, "warning");
+				fastMode.setEnabled(enabled);
+				try {
+					await onModeChange?.(enabled, ctx);
+				} catch (error) {
+					// Restore all three views of the mode after a partial refresh:
+					// in-memory request behavior, persisted preference, and model metadata.
+					fastMode.setEnabled(previousEnabled);
+					const rollbackErrors: string[] = [];
+					try {
+						saveConfigFile(agentDir, { fast: previousEnabled });
+					} catch (rollbackError) {
+						rollbackErrors.push(
+							`config rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+						);
+					}
+					try {
+						await onModeChange?.(previousEnabled, ctx);
+					} catch (rollbackError) {
+						rollbackErrors.push(
+							`pricing rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+						);
+					}
+					const message = error instanceof Error ? error.message : String(error);
+					const rollbackSuffix = rollbackErrors.length > 0 ? ` (${rollbackErrors.join("; ")})` : "";
+					ctx.ui.notify(`Failed to refresh model pricing: ${message}${rollbackSuffix}`, "warning");
+					onStatusChange?.(ctx);
+					return;
+				}
 				onStatusChange?.(ctx);
-				return;
-			}
-			onStatusChange?.(ctx);
 
-			const currentModel = ctx.model;
-			if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
-				if (enabled) {
-					ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
-				} else {
-					ctx.ui.notify("Fast mode is disabled globally.", "info");
+				const currentModel = ctx.model;
+				if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
+					if (enabled) {
+						ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
+					} else {
+						ctx.ui.notify("Fast mode is disabled globally.", "info");
+					}
 				}
+			} finally {
+				modeChangeInProgress = false;
 			}
 		},
 	});
@@ -419,9 +441,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
 		proactiveCompaction.getCompactionSettings(),
 	);
-	let refreshModelsForFast: (() => Promise<void>) | undefined;
-	const onFastModeChange = async (): Promise<void> => {
-		await refreshModelsForFast?.();
+	let refreshModelsForFast: ((ctx: ExtensionContext) => Promise<void>) | undefined;
+	const onFastModeChange = async (_enabled: boolean, ctx: ExtensionContext): Promise<void> => {
+		await refreshModelsForFast?.(ctx);
 	};
 	registerFastCommand({
 		pi,
@@ -474,10 +496,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			onFastModeChange,
 		});
 	};
-	refreshModelsForFast = async (): Promise<void> => {
+	refreshModelsForFast = async (ctx: ExtensionContext): Promise<void> => {
 		const currentConnection = resolveConnection(agentDir, identity.providerId);
-		if (currentConnection) {
-			await registerConfiguredProvider(currentConnection);
+		if (!currentConnection) return;
+
+		await registerConfiguredProvider(currentConnection);
+		const currentModel = ctx.model;
+		if (!currentModel || currentModel.provider !== identity.providerId) return;
+
+		const refreshedModel = ctx.modelRegistry.find(identity.providerId, currentModel.id);
+		if (!refreshedModel) {
+			throw new Error(`Refreshed model ${identity.providerId}/${currentModel.id} is unavailable`);
+		}
+		if (JSON.stringify(refreshedModel.cost) === JSON.stringify(currentModel.cost)) return;
+		if (!(await pi.setModel(refreshedModel))) {
+			throw new Error(`Unable to activate refreshed model ${identity.providerId}/${currentModel.id}`);
 		}
 	};
 

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AUTH_FILE_NAME,
 	buildInputModalities,
@@ -16,11 +16,13 @@ import {
 	decodeRefreshMeta,
 	encodeRefreshMeta,
 	extractReasoningEfforts,
+	fetchModelsDevCostMap,
 	firstNonEmpty,
 	isUnauthorizedModelsError,
 	loadAuthConnection,
 	loadConfigFile,
 	ModelsHttpError,
+	matchModelCost,
 	parseBooleanSetting,
 	resolveEndpoints,
 	resolveFastDefault,
@@ -30,6 +32,23 @@ import {
 	toPiModel,
 	ZERO_COST,
 } from "../extensions/lib.ts";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+	while (tempDirs.length > 0) {
+		const dir = tempDirs.pop();
+		if (dir) {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+});
+
+function tempAgentDir(): string {
+	const dir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-test-"));
+	tempDirs.push(dir);
+	return dir;
+}
 
 describe("firstNonEmpty", () => {
 	it("returns the first non-empty trimmed string", () => {
@@ -166,6 +185,197 @@ describe("model mapping helpers", () => {
 	});
 });
 
+describe("models.dev cost mapping", () => {
+	it("uses canonical provider prices, preserves context tiers, and reads Fast mode costs", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					openai: {
+						models: {
+							"gpt-5.6-sol": {
+								cost: {
+									input: 5,
+									output: 30,
+									cache_read: 0.5,
+									cache_write: 6.25,
+									tiers: [
+										{
+											input: 10,
+											output: 45,
+											cache_read: 1,
+											cache_write: 12.5,
+											tier: { type: "context", size: 272000 },
+										},
+									],
+									// This compatibility field must not create a duplicate 200k tier.
+									context_over_200k: { input: 10, output: 45, cache_read: 1, cache_write: 12.5 },
+								},
+								experimental: {
+									modes: {
+										fast: {
+											cost: { input: 10, output: 60, cache_read: 1, cache_write: 12.5 },
+										},
+									},
+								},
+							},
+						},
+					},
+					xpersona: {
+						models: {
+							"gpt-5.6-sol": { cost: { input: 1.5, output: 12, cache_read: 0.15 } },
+						},
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		);
+
+		try {
+			const catalog = await fetchModelsDevCostMap(tempAgentDir(), true);
+			expect(matchModelCost("gpt-5.6-sol", catalog)).toEqual({
+				input: 5,
+				output: 30,
+				cacheRead: 0.5,
+				cacheWrite: 6.25,
+				tiers: [
+					{
+						input: 10,
+						output: 45,
+						cacheRead: 1,
+						cacheWrite: 12.5,
+						inputTokensAbove: 272000,
+					},
+				],
+			});
+			expect(matchModelCost("gpt-5.6-sol", catalog, true)).toEqual({
+				input: 10,
+				output: 60,
+				cacheRead: 1,
+				cacheWrite: 12.5,
+			});
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it("resolves confirmed proxy aliases to canonical model prices", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					google: {
+						models: {
+							"gemini-3.1-pro-preview": {
+								cost: {
+									input: 2,
+									output: 12,
+									cache_read: 0.2,
+									tiers: [{ input: 4, output: 18, tier: { type: "context", size: 200000 } }],
+								},
+								experimental: { modes: { fast: { cost: { input: 4, output: 24, cache_read: 0.4 } } } },
+							},
+							"gemini-3.5-flash": { cost: { input: 1.5, output: 9, cache_read: 0.15 } },
+							"gemini-3.6-flash": { cost: { input: 1.5, output: 7.5, cache_read: 0.15 } },
+						},
+					},
+					xai: {
+						models: {
+							"grok-4.3": {
+								cost: {
+									input: 1.25,
+									output: 2.5,
+									tiers: [{ input: 2.5, output: 5, tier: { type: "context", size: 200000 } }],
+								},
+							},
+							"xai/grok-3-mini": { cost: { input: 0.3, output: 0.5 } },
+						},
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		);
+
+		try {
+			const catalog = await fetchModelsDevCostMap(tempAgentDir(), true);
+			expect(matchModelCost("gemini-pro-agent", catalog)).toMatchObject({ input: 2, output: 12 });
+			expect(matchModelCost("gemini-pro-agent", catalog, true)).toMatchObject({ input: 4, output: 24 });
+			expect(matchModelCost("gemini-3.1-pro-low", catalog).input).toBe(2);
+			expect(matchModelCost("gemini-3.6-flash-high", catalog).output).toBe(7.5);
+			expect(matchModelCost("gemini-3-flash-agent", catalog).output).toBe(9);
+			expect(matchModelCost("grok-composer-2.5-fast", catalog).tiers?.[0]?.inputTokensAbove).toBe(200000);
+			expect(matchModelCost("grok-3-mini", catalog)).toEqual({
+				input: 0.3,
+				output: 0.5,
+				cacheRead: 0,
+				cacheWrite: 0,
+			});
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it("caches models.dev payload to disk and serves subsequent calls from cache", async () => {
+		const tempDir = tempAgentDir();
+		let fetchCount = 0;
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			fetchCount++;
+			return new Response(
+				JSON.stringify({
+					openai: {
+						models: {
+							"gpt-5.6-sol": { cost: { input: 5, output: 30 } },
+						},
+					},
+				}),
+				{ status: 200 },
+			);
+		});
+
+		try {
+			const catalog1 = await fetchModelsDevCostMap(tempDir);
+			expect(fetchCount).toBe(1);
+			expect(matchModelCost("gpt-5.6-sol", catalog1).input).toBe(5);
+
+			// Second call within TTL should read from cache without hitting network
+			const catalog2 = await fetchModelsDevCostMap(tempDir);
+			expect(fetchCount).toBe(1);
+			expect(matchModelCost("gpt-5.6-sol", catalog2).input).toBe(5);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it("falls back to stale disk cache when network request fails", async () => {
+		const tempDir = tempAgentDir();
+		let shouldFail = false;
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			if (shouldFail) {
+				throw new Error("Network offline");
+			}
+			return new Response(
+				JSON.stringify({
+					openai: {
+						models: {
+							"gpt-5.6-sol": { cost: { input: 5, output: 30 } },
+						},
+					},
+				}),
+				{ status: 200 },
+			);
+		});
+
+		try {
+			await fetchModelsDevCostMap(tempDir);
+			shouldFail = true;
+
+			// Force refresh while offline should return stale cache instead of empty catalog
+			const catalog = await fetchModelsDevCostMap(tempDir, true);
+			expect(matchModelCost("gpt-5.6-sol", catalog).input).toBe(5);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+});
+
 describe("ModelsHttpError", () => {
 	it("detects unauthorized status", () => {
 		const unauthorized = new ModelsHttpError(401, "Unauthorized", "nope");
@@ -178,23 +388,6 @@ describe("ModelsHttpError", () => {
 });
 
 describe("config and auth file helpers", () => {
-	const tempDirs: string[] = [];
-
-	afterEach(() => {
-		while (tempDirs.length > 0) {
-			const dir = tempDirs.pop();
-			if (dir) {
-				rmSync(dir, { recursive: true, force: true });
-			}
-		}
-	});
-
-	function tempAgentDir(): string {
-		const dir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-test-"));
-		tempDirs.push(dir);
-		return dir;
-	}
-
 	it("loads empty config when file is missing", () => {
 		const agentDir = tempAgentDir();
 		expect(loadConfigFile(agentDir)).toEqual({});

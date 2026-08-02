@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
@@ -219,8 +221,9 @@ describe("Fast catalog mapping", () => {
 			),
 		);
 
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
 		try {
-			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key");
+			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key", false, agentDir);
 			expect(loaded.fastModelIds).toEqual(["gpt-5.4", "gpt-5.5"]);
 			expect(loaded.models.map((entry) => entry.id)).toEqual([
 				"gpt-5.4",
@@ -234,6 +237,65 @@ describe("Fast catalog mapping", () => {
 			);
 		} finally {
 			fetchMock.mockRestore();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("Fast pricing mapping", () => {
+	it("uses models.dev standard and experimental Fast prices when loading CPA models", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			if (String(input).startsWith("https://models.dev/")) {
+				return new Response(
+					JSON.stringify({
+						openai: {
+							models: {
+								"gpt-5.6-sol": {
+									cost: {
+										input: 5,
+										output: 30,
+										cache_read: 0.5,
+										cache_write: 6.25,
+									},
+									experimental: {
+										modes: {
+											fast: { cost: { input: 10, output: 60, cache_read: 1, cache_write: 12.5 } },
+										},
+									},
+								},
+							},
+						},
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(
+				JSON.stringify({
+					models: [{ slug: "gpt-5.6-sol", service_tiers: [{ id: "priority" }] }],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
+		try {
+			const standard = await loadMappedModels("http://127.0.0.1:8317", "test-key", false, agentDir);
+			const fast = await loadMappedModels("http://127.0.0.1:8317", "test-key", true, agentDir);
+			expect(standard.models[0]?.cost).toEqual({
+				input: 5,
+				output: 30,
+				cacheRead: 0.5,
+				cacheWrite: 6.25,
+			});
+			expect(fast.models[0]?.cost).toEqual({
+				input: 10,
+				output: 60,
+				cacheRead: 1,
+				cacheWrite: 12.5,
+			});
+		} finally {
+			fetchMock.mockRestore();
+			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
 });

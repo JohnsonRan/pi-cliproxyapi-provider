@@ -139,11 +139,22 @@ async function configureAndRegister(options: {
 	defaultBaseUrl: string;
 	streamSimple: CliproxyCodexStreamSimple;
 	fastMode: FastModeController;
+	onFastModeChange?: () => Promise<void>;
 }): Promise<{ modelCount: number; modelsUrl: string }> {
-	const { pi, agentDir, providerId, providerName, baseUrlInput, apiKey, defaultBaseUrl, streamSimple, fastMode } =
-		options;
+	const {
+		pi,
+		agentDir,
+		providerId,
+		providerName,
+		baseUrlInput,
+		apiKey,
+		defaultBaseUrl,
+		streamSimple,
+		fastMode,
+		onFastModeChange,
+	} = options;
 
-	const loaded = await loadMappedModels(baseUrlInput, apiKey);
+	const loaded = await loadMappedModels(baseUrlInput, apiKey, fastMode.isEnabled(), agentDir);
 
 	try {
 		saveConfigFile(agentDir, {
@@ -167,6 +178,7 @@ async function configureAndRegister(options: {
 		agentDir,
 		streamSimple,
 		fastMode,
+		onFastModeChange,
 	});
 	fastMode.setSupportedModelIds(loaded.fastModelIds);
 
@@ -181,8 +193,9 @@ function createOAuthHandlers(options: {
 	defaultBaseUrl: string;
 	streamSimple: CliproxyCodexStreamSimple;
 	fastMode: FastModeController;
+	onFastModeChange?: () => Promise<void>;
 }) {
-	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode } = options;
+	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode, onFastModeChange } = options;
 
 	return {
 		name: providerName,
@@ -209,6 +222,7 @@ function createOAuthHandlers(options: {
 						defaultBaseUrl,
 						streamSimple,
 						fastMode,
+						onFastModeChange,
 					});
 
 					logInfo(`login ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
@@ -268,10 +282,21 @@ function registerProvider(
 		agentDir: string;
 		streamSimple: CliproxyCodexStreamSimple;
 		fastMode: FastModeController;
+		onFastModeChange?: () => Promise<void>;
 	},
 ): void {
-	const { providerId, providerName, baseUrlInput, apiKey, models, defaultBaseUrl, agentDir, streamSimple, fastMode } =
-		options;
+	const {
+		providerId,
+		providerName,
+		baseUrlInput,
+		apiKey,
+		models,
+		defaultBaseUrl,
+		agentDir,
+		streamSimple,
+		fastMode,
+		onFastModeChange,
+	} = options;
 
 	const endpoints = resolveEndpoints(baseUrlInput);
 	const oauth = createOAuthHandlers({
@@ -282,6 +307,7 @@ function registerProvider(
 		defaultBaseUrl,
 		streamSimple,
 		fastMode,
+		onFastModeChange,
 	});
 
 	// Replace any previous registration so an earlier ambient apiKey does not linger
@@ -308,8 +334,9 @@ export function registerFastCommand(options: {
 	providerId: string;
 	fastMode: FastModeController;
 	onStatusChange?: (ctx: ExtensionContext) => void;
+	onModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }): void {
-	const { pi, agentDir, providerId, fastMode, onStatusChange } = options;
+	const { pi, agentDir, providerId, fastMode, onStatusChange, onModeChange } = options;
 
 	pi.registerCommand("fast", {
 		description: "Toggle CLIProxyAPI Fast mode globally.",
@@ -328,6 +355,22 @@ export function registerFastCommand(options: {
 				return;
 			}
 			fastMode.setEnabled(enabled);
+			try {
+				await onModeChange?.(enabled, ctx);
+			} catch (error) {
+				// Keep the registered model metadata and persisted preference in sync
+				// when a live provider refresh fails.
+				fastMode.setEnabled(!enabled);
+				try {
+					saveConfigFile(agentDir, { fast: !enabled });
+				} catch {
+					// The original save already succeeded; report the refresh failure below.
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Failed to refresh model pricing: ${message}`, "warning");
+				onStatusChange?.(ctx);
+				return;
+			}
 			onStatusChange?.(ctx);
 
 			const currentModel = ctx.model;
@@ -376,12 +419,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
 		proactiveCompaction.getCompactionSettings(),
 	);
+	let refreshModelsForFast: (() => Promise<void>) | undefined;
+	const onFastModeChange = async (): Promise<void> => {
+		await refreshModelsForFast?.();
+	};
 	registerFastCommand({
 		pi,
 		agentDir,
 		providerId: identity.providerId,
 		fastMode,
 		onStatusChange: (ctx) => fastFooter.refresh(ctx),
+		onModeChange: onFastModeChange,
 	});
 	fastFooter.register(pi);
 
@@ -394,10 +442,45 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		agentDir,
 		streamSimple,
 		fastMode,
+		onFastModeChange: onFastModeChange,
 	});
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
 
 	const connection = resolveConnection(agentDir, identity.providerId);
+	const registerConfiguredProvider = async (
+		currentConnection: NonNullable<ReturnType<typeof resolveConnection>>,
+	): Promise<void> => {
+		const loaded = await loadMappedModels(
+			currentConnection.baseUrlInput,
+			currentConnection.apiKey,
+			fastMode.isEnabled(),
+			agentDir,
+		);
+		fastMode.setSupportedModelIds(loaded.fastModelIds);
+		// Prefer OAuth-only registration when /login already stored credentials so
+		// `/login <provider>` jumps straight into the multi-field flow. Fall back to
+		// ambient apiKey only for config-file / env setups without auth.json.
+		const hasStoredLogin = hasLoginCredential(agentDir, identity.providerId);
+		registerProvider(pi, {
+			providerId: identity.providerId,
+			providerName: identity.providerName,
+			baseUrlInput: currentConnection.baseUrlInput,
+			apiKey: hasStoredLogin ? undefined : currentConnection.apiKey,
+			models: loaded.models,
+			defaultBaseUrl,
+			agentDir,
+			streamSimple,
+			fastMode,
+			onFastModeChange,
+		});
+	};
+	refreshModelsForFast = async (): Promise<void> => {
+		const currentConnection = resolveConnection(agentDir, identity.providerId);
+		if (currentConnection) {
+			await registerConfiguredProvider(currentConnection);
+		}
+	};
+
 	if (!connection) {
 		logInfo(
 			`not configured yet. Use /login ${identity.providerName} or /login ${identity.providerId}. ` +
@@ -408,23 +491,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	}
 
 	try {
-		const loaded = await loadMappedModels(connection.baseUrlInput, connection.apiKey);
-		fastMode.setSupportedModelIds(loaded.fastModelIds);
-		// Prefer OAuth-only registration when /login already stored credentials so
-		// `/login <provider>` jumps straight into the multi-field flow. Fall back to
-		// ambient apiKey only for config-file / env setups without auth.json.
-		const hasStoredLogin = hasLoginCredential(agentDir, identity.providerId);
-		registerProvider(pi, {
-			providerId: identity.providerId,
-			providerName: identity.providerName,
-			baseUrlInput: connection.baseUrlInput,
-			apiKey: hasStoredLogin ? undefined : connection.apiKey,
-			models: loaded.models,
-			defaultBaseUrl,
-			agentDir,
-			streamSimple,
-			fastMode,
-		});
+		await registerConfiguredProvider(connection);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (isUnauthorizedModelsError(error)) {

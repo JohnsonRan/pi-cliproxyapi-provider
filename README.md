@@ -10,7 +10,7 @@ Pi provider extension that discovers models from [CLIProxyAPI](https://github.co
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
 5. Registers inference against `{root}/backend-api/`.
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
-7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json` with a 24-hour TTL and provides `/cliproxyapi-refresh` to force a refresh.
+7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json`, refreshes it in the background on startup, and provides `/cliproxyapi-refresh` to force a refresh.
 8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 
 ## Install
@@ -91,7 +91,7 @@ You can still configure without `/login`.
 Optional fields:
 
 | Field | Default | Description |
-|-------|---------|-------------|
+| ------- | --------- | ------------- |
 | `baseUrl` | `http://127.0.0.1:8317` | CLIProxyAPI address |
 | `apiKey` | _(required unless set via /login or env)_ | Bearer token / CPA API key |
 | `providerId` | `cliproxyapi` | Provider id shown in `/model` |
@@ -101,7 +101,7 @@ Optional fields:
 ### Environment overrides
 
 | Variable | Overrides |
-|----------|-----------|
+| ---------- | ----------- |
 | `CLIPROXYAPI_BASE_URL` | `baseUrl` |
 | `CLIPROXYAPI_API_KEY` | `apiKey` |
 | `CLIPROXYAPI_PROVIDER_ID` | `providerId` |
@@ -122,7 +122,7 @@ The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.j
 Preferred form is **host:port only**:
 
 | Input | Inference baseUrl | Models URL |
-|-------|-------------------|------------|
+| ------- | ------------------- | ------------ |
 | `http://127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | `http://127.0.0.1:8317/v1/models?client_version=pi` |
 | `http://127.0.0.1:8317/backend-api` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 | `http://127.0.0.1:8317/v1` | `http://127.0.0.1:8317/backend-api/` | same models URL |
@@ -157,20 +157,17 @@ The cache stores only model metadata and derived endpoint URLs — the model lis
 | Property | Value |
 |----------|-------|
 | Cache file | `~/.pi/agent/cliproxyapi-models.json` |
-| TTL | 24 hours |
-| Remote query timeout | 3 seconds |
+| Remote query timeout | 60 seconds |
 | Scope | tied to the current `baseUrl` (a different base URL ignores the existing cache) |
 
 ### Startup / resume behavior
 
 When the provider loads (including session resume):
 
-1. If a **fresh** cache exists (age < 24 h) for the configured `baseUrl`, models are registered immediately from the cache and **no remote request is made** — startup stays fully offline.
-2. Otherwise (cache missing, stale, or scoped to a different `baseUrl`), a remote query to `{root}/v1/models?client_version=pi` is attempted with a 3-second timeout.
-   - On success, the cache is rewritten and the freshly fetched models are registered.
-   - On failure (network error, non-200, or timeout), the provider falls back to the stale cache if one exists (even if expired) and registers those models. If no cache is available, startup behaves as before: a warning is logged and no models are registered until the proxy responds.
+1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=pi` then runs in the background; on success, the cache is rewritten and the registered model list is refreshed. If the query fails, the existing cache remains active.
+2. If no matching cache exists, the remote query runs synchronously. On success, the cache is written and the fetched models are registered. If it fails, startup logs a warning and no models are registered until the proxy responds.
 
-Use `/cliproxyapi-refresh` to refresh a fresh cache on demand.
+Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog.
 
 ### Refresh commands
 
@@ -184,7 +181,7 @@ Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
 From CPA catalog entry → pi model:
 
 | CPA field | Pi field |
-|-----------|----------|
+| ----------- | ---------- |
 | `slug` | `id` |
 | `display_name` | `name` |
 | `context_window` | `contextWindow` |
@@ -220,7 +217,7 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
 - After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `cliproxyapi.json`.
 - The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged.
-- If a models request returns **HTTP 401** or CPA is unreachable during startup, the provider falls back to the cached catalog if one exists (even stale). Only when no cache is available is a warning logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
+- If a models request returns **HTTP 401** or CPA is unreachable during startup, an existing matching cache remains in use while the background refresh fails. Only when no cache is available is a warning logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key

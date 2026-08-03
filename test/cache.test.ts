@@ -3,17 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import providerExtension from "../extensions/index.ts";
 import {
 	CONFIG_FILE_NAME,
 	fetchCodexModels,
-	isModelsCacheFresh,
 	loadMappedModels,
 	loadModelsCache,
 	type MappedModels,
 	MODELS_CACHE_FILE_NAME,
-	MODELS_CACHE_TTL_MS,
 	MODELS_REQUEST_TIMEOUT_MS,
 	type PiProviderModel,
 	resolveEndpoints,
@@ -50,13 +48,16 @@ function createCodexModel(id: string, fast = false) {
 	};
 }
 
-function createMappedModels(options: { models?: PiProviderModel[]; fastModelIds?: string[] } = {}): MappedModels {
+function createMappedModels(
+	options: { models?: PiProviderModel[]; fastModelIds?: string[]; fastMode?: boolean } = {},
+): MappedModels {
 	const endpoints = resolveEndpoints("http://127.0.0.1:8317");
 	return {
 		models: options.models ?? [],
 		fastModelIds: options.fastModelIds ?? [],
 		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
+		...(options.fastMode === undefined ? {} : { fastMode: options.fastMode }),
 	};
 }
 
@@ -70,6 +71,12 @@ function tempAgentDir(): string {
 
 function writeConfig(agentDir: string, config: { baseUrl?: string; apiKey?: string }): void {
 	writeFileSync(join(agentDir, CONFIG_FILE_NAME), JSON.stringify(config, null, 2), "utf8");
+}
+
+async function waitForAsyncRefresh(): Promise<void> {
+	for (let index = 0; index < 10; index++) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 10));
+	}
 }
 
 async function withTempAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
@@ -132,7 +139,6 @@ describe("models cache helpers", () => {
 		const cache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 
 		expect(cache).toEqual({ ...loaded, fetchedAt });
-		expect(isModelsCacheFresh(cache!)).toBe(true);
 	});
 
 	it("returns null when the cache file is missing", () => {
@@ -170,35 +176,8 @@ describe("models cache helpers", () => {
 	});
 });
 
-describe("fresh/stale cache detection", () => {
-	const now = 1_700_000_000_000;
-
-	it("is fresh when age is strictly less than 24h", () => {
-		const cache = { ...createMappedModels(), fetchedAt: now - MODELS_CACHE_TTL_MS + 1 };
-		expect(isModelsCacheFresh(cache, now)).toBe(true);
-	});
-
-	it("is stale at exactly 24h", () => {
-		const cache = { ...createMappedModels(), fetchedAt: now - MODELS_CACHE_TTL_MS };
-		expect(isModelsCacheFresh(cache, now)).toBe(false);
-	});
-
-	it("is stale beyond 24h", () => {
-		const cache = { ...createMappedModels(), fetchedAt: now - MODELS_CACHE_TTL_MS - 1 };
-		expect(isModelsCacheFresh(cache, now)).toBe(false);
-	});
-});
-
 describe("models request timeout wiring", () => {
-	beforeEach(() => {
-		vi.useFakeTimers({ shouldAdvanceTime: true });
-	});
-
-	afterEach(() => {
-		vi.useRealTimers();
-	});
-
-	it("uses a 3s timeout by default", async () => {
+	it("uses the 60-second default timeout for mapped model requests", async () => {
 		const timeoutSpy = vi.spyOn(globalThis.AbortSignal, "timeout");
 		const fetchMock = vi
 			.spyOn(globalThis, "fetch")
@@ -206,40 +185,30 @@ describe("models request timeout wiring", () => {
 
 		try {
 			await loadMappedModels("http://127.0.0.1:8317", "key");
-			expect(MODELS_REQUEST_TIMEOUT_MS).toBe(3000);
-			expect(timeoutSpy).toHaveBeenCalledWith(3000);
+			expect(MODELS_REQUEST_TIMEOUT_MS).toBe(60_000);
+			expect(timeoutSpy).toHaveBeenCalledWith(MODELS_REQUEST_TIMEOUT_MS);
 			expect(timeoutSpy).toHaveBeenCalledTimes(1);
+			const requestInit = fetchMock.mock.calls[0]?.[1];
+			expect(requestInit).toBeDefined();
+			expect(requestInit).toHaveProperty("signal");
 		} finally {
 			fetchMock.mockRestore();
 			timeoutSpy.mockRestore();
 		}
 	});
 
-	it("allows the caller to override the timeout", async () => {
+	it("uses the 60-second default timeout through fetchCodexModels", async () => {
 		const timeoutSpy = vi.spyOn(globalThis.AbortSignal, "timeout");
 		const fetchMock = vi
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValue(new Response(JSON.stringify({ models: [] }), { status: 200 }));
 
 		try {
-			await loadMappedModels("http://127.0.0.1:8317", "key", 750);
-			expect(timeoutSpy).toHaveBeenCalledWith(750);
-			expect(timeoutSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			fetchMock.mockRestore();
-			timeoutSpy.mockRestore();
-		}
-	});
-
-	it("propagates a custom timeout through fetchCodexModels", async () => {
-		const timeoutSpy = vi.spyOn(globalThis.AbortSignal, "timeout");
-		const fetchMock = vi
-			.spyOn(globalThis, "fetch")
-			.mockResolvedValue(new Response(JSON.stringify({ models: [] }), { status: 200 }));
-
-		try {
-			await fetchCodexModels("http://127.0.0.1:8317/v1/models?client_version=pi", "key", 500);
-			expect(timeoutSpy).toHaveBeenCalledWith(500);
+			await fetchCodexModels("http://127.0.0.1:8317/v1/models?client_version=pi", "key");
+			expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+			const requestInit = fetchMock.mock.calls[0]?.[1];
+			expect(requestInit).toBeDefined();
+			expect(requestInit).toHaveProperty("signal");
 		} finally {
 			fetchMock.mockRestore();
 			timeoutSpy.mockRestore();
@@ -248,10 +217,10 @@ describe("models request timeout wiring", () => {
 });
 
 describe("resolveMappedModels cache behavior", () => {
-	it("returns fresh cache without fetching", async () => {
+	it("returns an existing cache without fetching regardless of age", async () => {
 		const agentDir = tempAgentDir();
 		const cached = createMappedModels({ models: [createModel("cached")], fastModelIds: ["fast-cached"] });
-		saveModelsCache(agentDir, cached, Date.now() - 60 * 60 * 1000);
+		saveModelsCache(agentDir, cached, 1);
 
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("should not fetch"));
 
@@ -259,9 +228,31 @@ describe("resolveMappedModels cache behavior", () => {
 			const result = await resolveMappedModels(agentDir, "http://127.0.0.1:8317", "key");
 			expect(fetchMock).not.toHaveBeenCalled();
 			expect(result.fromCache).toBe(true);
-			expect(result.stale).toBeUndefined();
 			expect(result.loaded.models).toEqual(cached.models);
 			expect(result.loaded.fastModelIds).toEqual(["fast-cached"]);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it("does not use a cache generated for a different Fast mode", async () => {
+		const agentDir = tempAgentDir();
+		const cached = createMappedModels({ models: [createModel("cached")], fastMode: false });
+		saveModelsCache(agentDir, cached, Date.now());
+
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			if (String(input).includes("models.dev")) {
+				return new Response("{}", { status: 200 });
+			}
+			return new Response(JSON.stringify({ models: [createCodexModel("remote-fast")] }), { status: 200 });
+		});
+
+		try {
+			const result = await resolveMappedModels(agentDir, "http://127.0.0.1:8317", "key", { fastMode: true });
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(result.fromCache).toBe(false);
+			expect(result.loaded.models[0]?.id).toBe("remote-fast");
+			expect(loadModelsCache(agentDir, "http://127.0.0.1:8317")?.fastMode).toBe(true);
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -280,7 +271,6 @@ describe("resolveMappedModels cache behavior", () => {
 			expect(result.loaded.models.map((model) => model.id)).toEqual(["remote"]);
 			const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 			expect(diskCache?.models[0].id).toBe("remote");
-			expect(isModelsCacheFresh(diskCache!)).toBe(true);
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -307,41 +297,18 @@ describe("resolveMappedModels cache behavior", () => {
 		}
 	});
 
-	it("refreshes a stale cache when the remote call succeeds", async () => {
+	it("leaves the existing cache untouched until a forced refresh", async () => {
 		const agentDir = tempAgentDir();
-		const stale = createMappedModels({ models: [createModel("stale")] });
-		saveModelsCache(agentDir, stale, Date.now() - MODELS_CACHE_TTL_MS - 1000);
-
-		const fetchMock = vi
-			.spyOn(globalThis, "fetch")
-			.mockResolvedValue(new Response(JSON.stringify({ models: [createCodexModel("fresh")] }), { status: 200 }));
-
-		try {
-			const result = await resolveMappedModels(agentDir, "http://127.0.0.1:8317", "key");
-			expect(fetchMock).toHaveBeenCalledTimes(1);
-			expect(result.fromCache).toBe(false);
-			expect(result.loaded.models[0].id).toBe("fresh");
-			const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
-			expect(diskCache?.models[0].id).toBe("fresh");
-			expect(isModelsCacheFresh(diskCache!)).toBe(true);
-		} finally {
-			fetchMock.mockRestore();
-		}
-	});
-
-	it("falls back to a stale cache when the remote call fails", async () => {
-		const agentDir = tempAgentDir();
-		const stale = createMappedModels({ models: [createModel("stale-fallback")] });
-		saveModelsCache(agentDir, stale, Date.now() - MODELS_CACHE_TTL_MS - 1000);
+		const cached = createMappedModels({ models: [createModel("cached-fallback")] });
+		saveModelsCache(agentDir, cached, 1);
 
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
 
 		try {
 			const result = await resolveMappedModels(agentDir, "http://127.0.0.1:8317", "key");
-			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(fetchMock).not.toHaveBeenCalled();
 			expect(result.fromCache).toBe(true);
-			expect(result.stale).toBe(true);
-			expect(result.loaded.models[0].id).toBe("stale-fallback");
+			expect(result.loaded.models[0].id).toBe("cached-fallback");
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -350,7 +317,7 @@ describe("resolveMappedModels cache behavior", () => {
 	it("does not fall back when forceRefresh is requested and the remote call fails", async () => {
 		const agentDir = tempAgentDir();
 		const stale = createMappedModels({ models: [createModel("stale")] });
-		saveModelsCache(agentDir, stale, Date.now() - MODELS_CACHE_TTL_MS - 1000);
+		saveModelsCache(agentDir, stale, 1);
 
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
 
@@ -366,82 +333,149 @@ describe("resolveMappedModels cache behavior", () => {
 });
 
 describe("provider startup cache behavior", () => {
-	it("uses a fresh cache on startup and does not fetch", async () => {
+	it("waits for the remote catalog when no cache exists", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
-			const cached = createMappedModels({
-				models: [createModel("startup-cached")],
-				fastModelIds: ["startup-fast"],
+			let releaseRemote!: (response: Response) => void;
+			const remoteResponse = new Promise<Response>((resolve) => {
+				releaseRemote = resolve;
 			});
-			saveModelsCache(agentDir, cached, Date.now() - 60 * 60 * 1000);
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				if (String(input).includes("models.dev")) {
+					return new Response("{}", { status: 200 });
+				}
+				return remoteResponse;
+			});
+			const { pi } = createPiMock();
 
-			const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("should not fetch"));
+			try {
+				const startup = providerExtension(pi);
+				await waitForAsyncRefresh();
+				expect(fetchMock).toHaveBeenCalledTimes(2);
+				releaseRemote(
+					new Response(JSON.stringify({ models: [createCodexModel("startup-remote")] }), { status: 200 }),
+				);
+				await expect(startup).resolves.toBeUndefined();
+
+				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
+				expect(diskCache?.models[0].id).toBe("startup-remote");
+			} finally {
+				fetchMock.mockRestore();
+			}
+		});
+	});
+
+	it("uses the cache immediately and refreshes the model list in the background", async () => {
+		await withTempAgentDir(async (agentDir) => {
+			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
+			const cached = createMappedModels({ models: [createModel("startup-cached")], fastModelIds: ["cached-fast"] });
+			saveModelsCache(agentDir, cached, 1);
+
+			let releaseRemote!: (response: Response) => void;
+			const remoteResponse = new Promise<Response>((resolve) => {
+				releaseRemote = resolve;
+			});
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				if (String(input).includes("models.dev")) {
+					return new Response("{}", { status: 200 });
+				}
+				return remoteResponse;
+			});
 			const { pi, commands } = createPiMock();
 
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
-				expect(fetchMock).not.toHaveBeenCalled();
+				expect(fetchMock).toHaveBeenCalledTimes(2);
 				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 
-				const callsWithModels = (
+				const initialCallsWithModels = (
 					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
 						[string, { models?: PiProviderModel[] }]
 					>
 				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(callsWithModels.length).toBeGreaterThan(0);
-				expect(callsWithModels[0]?.[1].models?.map((model: PiProviderModel) => model.id)).toEqual([
+				expect(initialCallsWithModels[0]?.[1].models?.map((model: PiProviderModel) => model.id)).toEqual([
 					"startup-cached",
 				]);
+
+				releaseRemote(
+					new Response(JSON.stringify({ models: [createCodexModel("background-fresh", true)] }), { status: 200 }),
+				);
+				await waitForAsyncRefresh();
+
+				const refreshedCallsWithModels = (
+					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
+						[string, { models?: PiProviderModel[] }]
+					>
+				).filter(([, config]) => config.models && config.models.length > 0);
+				expect(refreshedCallsWithModels.at(-1)?.[1].models?.[0].id).toBe("background-fresh");
+				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
+				expect(diskCache?.models[0].id).toBe("background-fresh");
+				expect(diskCache?.fastModelIds).toEqual(["background-fresh"]);
 			} finally {
 				fetchMock.mockRestore();
 			}
 		});
 	});
 
-	it("refreshes a stale cache on startup and registers the new models", async () => {
+	it("does not let a superseded background refresh overwrite a newer refresh", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
-			const stale = createMappedModels({ models: [createModel("stale-startup")] });
-			saveModelsCache(agentDir, stale, Date.now() - MODELS_CACHE_TTL_MS - 1000);
+			const cached = createMappedModels({ models: [createModel("startup-cached")] });
+			saveModelsCache(agentDir, cached, 1);
 
-			const fetchMock = vi
-				.spyOn(globalThis, "fetch")
-				.mockResolvedValue(
-					new Response(JSON.stringify({ models: [createCodexModel("fresh-startup", true)] }), { status: 200 }),
-				);
-			const { pi } = createPiMock();
+			let releaseBackground!: (response: Response) => void;
+			const backgroundResponse = new Promise<Response>((resolve) => {
+				releaseBackground = resolve;
+			});
+			let modelRequestCount = 0;
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				if (String(input).includes("models.dev")) {
+					return new Response("{}", { status: 200 });
+				}
+				modelRequestCount += 1;
+				if (modelRequestCount === 1) return backgroundResponse;
+				return new Response(JSON.stringify({ models: [createCodexModel("newer")] }), { status: 200 });
+			});
+			const { pi, commands } = createPiMock();
 
 			try {
-				await expect(providerExtension(pi)).resolves.toBeUndefined();
-				expect(fetchMock).toHaveBeenCalledTimes(2);
+				await providerExtension(pi);
+				const refresh = commands.get("cliproxyapi-refresh")!;
+				const notify = vi.fn();
+				await refresh.handler("", { ui: { notify } } as unknown as ExtensionCommandContext);
 
+				const diskCacheAfterNewerRefresh = loadModelsCache(agentDir, "http://127.0.0.1:8317");
+				expect(diskCacheAfterNewerRefresh?.models[0]?.id).toBe("newer");
+
+				releaseBackground(new Response(JSON.stringify({ models: [createCodexModel("older")] }), { status: 200 }));
+				await waitForAsyncRefresh();
+
+				const diskCacheAfterOlderRefresh = loadModelsCache(agentDir, "http://127.0.0.1:8317");
+				expect(diskCacheAfterOlderRefresh?.models[0]?.id).toBe("newer");
 				const callsWithModels = (
 					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
 						[string, { models?: PiProviderModel[] }]
 					>
 				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(callsWithModels[0]?.[1].models?.[0].id).toBe("fresh-startup");
-
-				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
-				expect(diskCache?.models[0].id).toBe("fresh-startup");
-				expect(diskCache?.fastModelIds).toEqual(["fresh-startup"]);
+				expect(callsWithModels.at(-1)?.[1].models?.[0]?.id).toBe("newer");
 			} finally {
 				fetchMock.mockRestore();
 			}
 		});
 	});
 
-	it("falls back to a stale cache when the startup fetch fails", async () => {
+	it("keeps the cache when the background refresh fails", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
-			const stale = createMappedModels({ models: [createModel("stale-fallback-startup")] });
-			saveModelsCache(agentDir, stale, Date.now() - MODELS_CACHE_TTL_MS - 1000);
+			const cached = createMappedModels({ models: [createModel("startup-fallback")] });
+			saveModelsCache(agentDir, cached, 1);
 
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
 			const { pi } = createPiMock();
 
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
+				await waitForAsyncRefresh();
 				expect(fetchMock).toHaveBeenCalledTimes(2);
 
 				const callsWithModels = (
@@ -449,7 +483,9 @@ describe("provider startup cache behavior", () => {
 						[string, { models?: PiProviderModel[] }]
 					>
 				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(callsWithModels[0]?.[1].models?.[0].id).toBe("stale-fallback-startup");
+				expect(callsWithModels[0]?.[1].models?.[0].id).toBe("startup-fallback");
+				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
+				expect(diskCache?.models[0].id).toBe("startup-fallback");
 			} finally {
 				fetchMock.mockRestore();
 			}
@@ -498,7 +534,7 @@ describe("/cliproxyapi-refresh command", () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
 			const stale = createMappedModels({ models: [createModel("stale-refresh")] });
-			saveModelsCache(agentDir, stale, Date.now() - MODELS_CACHE_TTL_MS - 1000);
+			saveModelsCache(agentDir, stale, 1);
 
 			const fetchMock = vi
 				.spyOn(globalThis, "fetch")

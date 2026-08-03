@@ -19,8 +19,7 @@ export const CONFIG_FILE_NAME = "cliproxyapi.json";
 export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
 export const AUTH_FILE_NAME = "auth.json";
 export const CLIENT_VERSION = "pi";
-export const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-export const MODELS_REQUEST_TIMEOUT_MS = 3000;
+export const MODELS_REQUEST_TIMEOUT_MS = 60_000;
 
 /** Keep login credentials effectively permanent; reconfigure via /login. */
 export const CREDENTIAL_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
@@ -285,10 +284,6 @@ export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsC
 	}
 }
 
-export function isModelsCacheFresh(cache: ModelsCacheFile, now = Date.now()): boolean {
-	return now - cache.fetchedAt < MODELS_CACHE_TTL_MS;
-}
-
 export function saveModelsCache(agentDir: string, loaded: MappedModels, fetchedAt = Date.now()): void {
 	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
 	mkdirSync(dirname(cachePath), { recursive: true });
@@ -512,13 +507,16 @@ export async function fetchCodexModels(
 	modelsUrl: string,
 	apiKey: string,
 	timeoutMs = MODELS_REQUEST_TIMEOUT_MS,
+	signal?: AbortSignal,
 ): Promise<CodexClientModel[]> {
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const response = await fetch(modelsUrl, {
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
 			Accept: "application/json",
 		},
-		signal: AbortSignal.timeout(timeoutMs),
+		signal: requestSignal,
 	});
 
 	// Login validation only requires HTTP 200; non-2xx means credentials/baseUrl failed.
@@ -553,7 +551,6 @@ export async function fetchCodexModels(
 export interface ResolvedModelsResult {
 	loaded: MappedModels;
 	fromCache: boolean;
-	stale?: boolean;
 }
 
 const MODEL_NAMESPACE_PREFIX =
@@ -794,7 +791,11 @@ function buildCatalogFromProviders(providers: Record<string, unknown>): ModelsDe
 	return catalog;
 }
 
-export async function fetchModelsDevCostMap(agentDir?: string, forceRefresh = false): Promise<ModelsDevCostCatalog> {
+export async function fetchModelsDevCostMap(
+	agentDir?: string,
+	forceRefresh = false,
+	signal?: AbortSignal,
+): Promise<ModelsDevCostCatalog> {
 	const cachePath = getModelsDevCachePath(agentDir);
 	const cached = readModelsDevCacheFile(cachePath);
 
@@ -804,8 +805,9 @@ export async function fetchModelsDevCostMap(agentDir?: string, forceRefresh = fa
 
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), 3000);
+	const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
 	try {
-		const response = await fetch("https://models.dev/api.json", { signal: controller.signal });
+		const response = await fetch("https://models.dev/api.json", { signal: requestSignal });
 		if (response.ok) {
 			const providers = asRecord(await response.json());
 			if (providers && isModelsDevProviders(providers)) {
@@ -837,17 +839,18 @@ export async function loadMappedModels(
 	apiKey: string,
 	timeoutOrFastMode: number | boolean = MODELS_REQUEST_TIMEOUT_MS,
 	agentDir?: string,
+	signal?: AbortSignal,
 ): Promise<MappedModels> {
 	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
+	const effectiveFastMode = typeof timeoutOrFastMode === "boolean" ? timeoutOrFastMode : false;
 	const timeoutMs = typeof timeoutOrFastMode === "number" ? timeoutOrFastMode : MODELS_REQUEST_TIMEOUT_MS;
-	const fastMode = pricingEnabled ? timeoutOrFastMode : false;
 	const endpoints = resolveEndpoints(baseUrlInput);
 	const [remoteModels, costCatalog] = await Promise.all([
-		fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs),
-		pricingEnabled ? fetchModelsDevCostMap(agentDir) : Promise.resolve(undefined),
+		fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs, signal),
+		pricingEnabled ? fetchModelsDevCostMap(agentDir, false, signal) : Promise.resolve(undefined),
 	]);
 	const models = remoteModels
-		.map((model) => toPiModel(model, costCatalog, fastMode))
+		.map((model) => toPiModel(model, costCatalog, effectiveFastMode))
 		.filter((model): model is PiProviderModel => model !== null);
 	const fastModelIds = Array.from(
 		new Set(
@@ -864,43 +867,38 @@ export async function loadMappedModels(
 		fastModelIds,
 		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
-		...(pricingEnabled ? { fastMode } : {}),
+		...(pricingEnabled ? { fastMode: effectiveFastMode } : {}),
 	};
 }
 
 /**
- * Load mapped models from fresh cache, or fetch remotely and update the cache.
- * When the remote fetch fails and a stale cache exists, the stale cache is
- * returned so the provider can keep working offline.
+ * Load mapped models from the matching cache, or fetch remotely and update the cache.
+ * A forced refresh always bypasses the cache.
  */
 export async function resolveMappedModels(
 	agentDir: string,
 	baseUrlInput: string,
 	apiKey: string,
-	options: { forceRefresh?: boolean; timeoutMs?: number; fastMode?: boolean } = {},
+	options: {
+		forceRefresh?: boolean;
+		fastMode?: boolean;
+		signal?: AbortSignal;
+		shouldCommit?: () => boolean;
+	} = {},
 ): Promise<ResolvedModelsResult> {
 	const cacheMatchesFastMode = (cache: ModelsCacheFile): boolean =>
-		options.fastMode === undefined ? true : (cache.fastMode ?? false) === options.fastMode;
+		options.fastMode === undefined || (cache.fastMode ?? false) === options.fastMode;
 
 	if (!options.forceRefresh) {
 		const cache = loadModelsCache(agentDir, baseUrlInput);
-		if (cache && isModelsCacheFresh(cache) && cacheMatchesFastMode(cache)) {
+		if (cache && cacheMatchesFastMode(cache)) {
 			return { loaded: cache, fromCache: true };
 		}
 	}
 
-	try {
-		const loadArgument = options.fastMode ?? options.timeoutMs ?? MODELS_REQUEST_TIMEOUT_MS;
-		const loaded = await loadMappedModels(baseUrlInput, apiKey, loadArgument, agentDir);
+	const loaded = await loadMappedModels(baseUrlInput, apiKey, options.fastMode, agentDir, options.signal);
+	if (!options.signal?.aborted && (options.shouldCommit?.() ?? true)) {
 		saveModelsCache(agentDir, loaded);
-		return { loaded, fromCache: false };
-	} catch (error) {
-		if (!options.forceRefresh) {
-			const staleCache = loadModelsCache(agentDir, baseUrlInput);
-			if (staleCache) {
-				return { loaded: staleCache, fromCache: true, stale: true };
-			}
-		}
-		throw error;
 	}
+	return { loaded, fromCache: false };
 }

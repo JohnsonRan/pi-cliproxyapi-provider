@@ -128,6 +128,7 @@ describe("Fast footer model status", () => {
 			ui: {
 				theme: {
 					fg: (color: string, text: string) => (color === "warning" ? `<yellow>${text}</yellow>` : text),
+					getColorMode: () => "256color",
 				},
 			},
 		} as unknown as ExtensionContext;
@@ -150,23 +151,22 @@ describe("Fast footer model status", () => {
 				contextWindow: 372000,
 			});
 
+			const orangePaused = "\x1b[38;5;214mpaused\x1b[39m";
 			pauseMode.setEnabled(true);
-			expect(component.render(80)).toEqual([
-				"gpt-5.4 • xhigh • <yellow>fast</yellow> • <yellow>paused</yellow>|false",
-			]);
+			expect(component.render(80)).toEqual([`gpt-5.4 • xhigh • <yellow>fast</yellow> • ${orangePaused}|false`]);
 			pauseMode.setEnabled(false);
 			fastMode.setEnabled(false);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
 
 			pauseMode.setEnabled(true);
-			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>paused</yellow>|false"]);
+			expect(component.render(80)).toEqual([`gpt-5.4 • xhigh • ${orangePaused}|false`]);
 			pauseMode.setEnabled(false);
 			fastMode.setEnabled(true);
 			fastMode.setSupportedModelIds([]);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
 
 			pauseMode.setEnabled(true);
-			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>paused</yellow>|false"]);
+			expect(component.render(80)).toEqual([`gpt-5.4 • xhigh • ${orangePaused}|false`]);
 			pauseMode.setEnabled(false);
 			fastMode.setSupportedModelIds([model.id]);
 

@@ -30,12 +30,14 @@ describe("Codex WebSocket transport patch", () => {
 		expect(patched).toContain("let websocketRetries = 0;");
 		expect(patched).toContain("const connectionLimitBeforeStart = !websocketStarted");
 		expect(patched).toContain("isCodexNonTransportError(error) && !connectionLimitBeforeStart");
+		expect(patched).toContain("const previousResponseNotFound = isPreviousResponseNotFoundError(error);");
+		expect(patched).toContain("recordWebSocketFailure(cacheSessionId, error);");
 		expect(patched).toContain("const maxWebSocketRetries = Number.isFinite(options?.maxRetries)");
 		expect(patched).toContain("? Math.min(Math.max(0, Math.floor(options.maxRetries)), 5)");
 		expect(patched).toContain(": 3;");
 		expect(patched).not.toContain('fallbackTransport: websocketStarted ? undefined : "sse",');
 		expect(patched).not.toContain("websocketSseFallbackSessions.add(sessionId);");
-		expect(patched).not.toContain("recordWebSocketSseFallback(options?.sessionId);\n                        break;");
+		expect(patched).not.toMatch(/recordWebSocketSseFallback\([^)]*\);\s*break;/);
 	});
 });
 
@@ -101,7 +103,7 @@ describe("Fast footer model status", () => {
 
 	it("patches and restores the built-in footer across session reloads", () => {
 		const originalRender = FooterComponent.prototype.render;
-		const displayModel = { id: model.id, provider: model.provider, reasoning: true };
+		const displayModel = { id: model.id, provider: model.provider, reasoning: true, contextWindow: 372000 };
 		const stubRender = function stubRender(this: FooterComponent, width: number): string[] {
 			const session = (this as unknown as { session: { state: { model: typeof displayModel } } }).session;
 			if (width < 0) throw new Error("render failed");
@@ -134,7 +136,12 @@ describe("Fast footer model status", () => {
 			handlers.get("session_start")?.({}, ctx);
 
 			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
-			expect(displayModel).toEqual({ id: "gpt-5.4", provider: "cliproxyapi", reasoning: true });
+			expect(displayModel).toEqual({
+				id: "gpt-5.4",
+				provider: "cliproxyapi",
+				reasoning: true,
+				contextWindow: 372000,
+			});
 
 			fastMode.setEnabled(false);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
@@ -144,13 +151,51 @@ describe("Fast footer model status", () => {
 			fastMode.setSupportedModelIds([model.id]);
 
 			expect(() => component.render(-1)).toThrow("render failed");
-			expect(displayModel).toEqual({ id: "gpt-5.4", provider: "cliproxyapi", reasoning: true });
+			expect(displayModel.contextWindow).toBe(372000);
 
 			handlers.get("session_shutdown")?.({}, ctx);
 			expect(FooterComponent.prototype.render).toBe(stubRender);
 
 			handlers.get("session_start")?.({}, ctx);
 			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
+		} finally {
+			handlers.get("session_shutdown")?.({}, ctx);
+			FooterComponent.prototype.render = originalRender;
+		}
+	});
+
+	it("uses the compaction threshold for the footer percentage and denominator", () => {
+		const originalRender = FooterComponent.prototype.render;
+		const displayModel = { id: model.id, provider: model.provider, reasoning: true, contextWindow: 372000 };
+		const stubRender = function stubRender(this: FooterComponent): string[] {
+			const session = (this as unknown as { session: { state: { model: typeof displayModel } } }).session;
+			const contextWindow = session.state.model.contextWindow;
+			return [`${((100000 / contextWindow) * 100).toFixed(1)}%/${Math.round(contextWindow / 1000)}k`];
+		};
+		const fastMode = new FastModeController(false);
+		const footer = new FastFooterController(model.provider, fastMode, () => ({
+			enabled: true,
+			reserveTokens: 65536,
+		}));
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+		} as unknown as ExtensionAPI;
+		const ctx = { mode: "tui" } as ExtensionContext;
+		const component = Object.create(FooterComponent.prototype) as FooterComponent;
+		Object.defineProperty(component, "session", { value: { state: { model: displayModel } } });
+		Object.defineProperty(component, "autoCompactEnabled", { value: true, writable: true });
+
+		try {
+			FooterComponent.prototype.render = stubRender;
+			footer.register(pi);
+			handlers.get("session_start")?.({}, ctx);
+
+			expect(component.render(80)).toEqual(["32.6%/306k"]);
+			expect(displayModel.contextWindow).toBe(372000);
+
+			(component as unknown as { autoCompactEnabled: boolean }).autoCompactEnabled = false;
+			expect(component.render(80)).toEqual(["26.9%/372k"]);
 		} finally {
 			handlers.get("session_shutdown")?.({}, ctx);
 			FooterComponent.prototype.render = originalRender;

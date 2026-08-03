@@ -1,4 +1,5 @@
 import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
+import type { ProactiveCompactionSettings } from "./auto-compact.ts";
 import type { FastModeController } from "./fast.ts";
 
 const FAST_FOOTER_PATCH = Symbol.for("@router-for-me/pi-cliproxyapi-provider/fast-footer-patch");
@@ -8,6 +9,7 @@ interface MutableModel {
 	id: string;
 	provider: string;
 	reasoning: boolean;
+	contextWindow: number;
 }
 
 interface FooterSessionLike {
@@ -19,6 +21,7 @@ interface FooterSessionLike {
 
 interface FooterComponentLike {
 	session?: FooterSessionLike;
+	autoCompactEnabled?: boolean;
 }
 
 interface FooterPatchState {
@@ -57,12 +60,13 @@ function installFooterPatch(controller: FastFooterController): void {
 			controllers: new Set(),
 			originalRender,
 			patchedRender(this: FooterComponent, width: number): string[] {
-				const session = (this as unknown as FooterComponentLike).session;
+				const footer = this as unknown as FooterComponentLike;
+				const session = footer.session;
 				const model = session?.state.model;
 				let activeController: FastFooterController | undefined;
 				if (model) {
 					for (const candidate of patchState?.controllers ?? []) {
-						if (candidate.isEffectiveFor(model)) {
+						if (candidate.isProviderModel(model)) {
 							activeController = candidate;
 							break;
 						}
@@ -74,17 +78,25 @@ function installFooterPatch(controller: FastFooterController): void {
 
 				const originalId = model.id;
 				const originalReasoning = model.reasoning;
-				model.id = activeController.formatModelStatus(
-					originalId,
-					originalReasoning,
-					session?.state.thinkingLevel ?? "off",
+				const originalContextWindow = model.contextWindow;
+				if (activeController.isEffectiveFor(model)) {
+					model.id = activeController.formatModelStatus(
+						originalId,
+						originalReasoning,
+						session?.state.thinkingLevel ?? "off",
+					);
+					model.reasoning = false;
+				}
+				model.contextWindow = activeController.getDisplayContextWindow(
+					originalContextWindow,
+					footer.autoCompactEnabled ?? false,
 				);
-				model.reasoning = false;
 				try {
 					return originalRender.call(this, width);
 				} finally {
 					model.id = originalId;
 					model.reasoning = originalReasoning;
+					model.contextWindow = originalContextWindow;
 				}
 			},
 		};
@@ -115,6 +127,7 @@ export class FastFooterController {
 	constructor(
 		private readonly providerId: string,
 		private readonly fastMode: FastModeController,
+		private readonly resolveCompactionSettings: () => ProactiveCompactionSettings | undefined = () => undefined,
 	) {}
 
 	register(pi: ExtensionAPI): void {
@@ -138,8 +151,21 @@ export class FastFooterController {
 		return formatFastModelStatus(modelName, supportsReasoning, thinkingLevel, true, fastLabel);
 	}
 
+	isProviderModel(model: MutableModel): boolean {
+		return model.provider === this.providerId;
+	}
+
 	isEffectiveFor(model: MutableModel): boolean {
-		return model.provider === this.providerId && this.fastMode.isEffectiveFor(model.id);
+		return this.isProviderModel(model) && this.fastMode.isEffectiveFor(model.id);
+	}
+
+	getDisplayContextWindow(contextWindow: number, autoCompactEnabled: boolean): number {
+		const settings = this.resolveCompactionSettings();
+		if (!autoCompactEnabled || !settings || !Number.isFinite(settings.reserveTokens) || settings.reserveTokens < 0) {
+			return contextWindow;
+		}
+		const availableContextWindow = contextWindow - settings.reserveTokens;
+		return availableContextWindow > 0 ? availableContextWindow : contextWindow;
 	}
 
 	refresh(ctx: ExtensionContext): void {

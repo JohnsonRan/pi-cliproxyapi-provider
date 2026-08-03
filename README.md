@@ -214,6 +214,7 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 
 ## Failure behavior
 
+- CLIProxyAPI `closed network connection` responses are normalized as transient network errors so pi's agent-level retry policy reconnects and restarts the interrupted assistant turn. Completed conversation and tool results remain available; token streaming does not resume from the exact interruption point.
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
 - After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `cliproxyapi.json`.
 - The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged.

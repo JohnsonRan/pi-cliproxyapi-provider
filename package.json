@@ -1,6 +1,6 @@
 {
 	"name": "@router-for-me/pi-cliproxyapi-provider",
-	"version": "1.4.7",
+	"version": "1.4.10",
 	"description": "Pi provider extension that auto-registers CLIProxyAPI models, plus TUI elapsed/TPS status",
 	"type": "module",
 	"keywords": [
@@ -39,12 +39,12 @@
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": ">=0.80.9 <0.81.0"
+		"@earendil-works/pi-coding-agent": ">=0.82.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.3",
-		"@earendil-works/pi-ai": "0.80.9",
-		"@earendil-works/pi-coding-agent": "0.80.9",
+		"@earendil-works/pi-ai": "0.82.0",
+		"@earendil-works/pi-coding-agent": "0.82.0",
 		"@types/node": "^22.15.21",
 		"typescript": "6.0.3",
 		"vitest": "4.1.9"

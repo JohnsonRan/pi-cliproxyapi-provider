@@ -413,7 +413,7 @@ describe("provider startup cache behavior", () => {
 
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
-				expect(fetchMock).toHaveBeenCalledTimes(1);
+				expect(fetchMock).toHaveBeenCalledTimes(2);
 
 				const callsWithModels = (
 					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
@@ -442,7 +442,7 @@ describe("provider startup cache behavior", () => {
 
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
-				expect(fetchMock).toHaveBeenCalledTimes(1);
+				expect(fetchMock).toHaveBeenCalledTimes(2);
 
 				const callsWithModels = (
 					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
@@ -518,7 +518,7 @@ describe("/cliproxyapi-refresh command", () => {
 
 				await refresh.handler("", ctx);
 
-				expect(fetchMock).toHaveBeenCalledTimes(2);
+				expect(fetchMock).toHaveBeenCalledTimes(4);
 				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Refreshed 1 CLIProxyAPI models"), "info");
 
 				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");

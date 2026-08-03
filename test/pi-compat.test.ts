@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import providerExtension from "../extensions/index.ts";
 import { AUTH_FILE_NAME } from "../extensions/lib.ts";
@@ -42,17 +43,37 @@ async function withTempAgentDir(run: (agentDir: string) => Promise<void>): Promi
 
 function createPiMock(commands: Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>) {
 	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
+	const registeredModels = new Map<string, Model<Api>>();
 	const pi = {
 		registerCommand: vi.fn((name: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]) => {
 			commands.set(name, options);
 		}),
-		unregisterProvider: vi.fn(),
-		registerProvider: vi.fn(),
+		unregisterProvider: vi.fn((providerId: string) => {
+			for (const key of registeredModels.keys()) {
+				if (key.startsWith(`${providerId}/`)) registeredModels.delete(key);
+			}
+		}),
+		registerProvider: vi.fn((providerId: string, config: Record<string, unknown>) => {
+			const models = Array.isArray(config.models) ? config.models : [];
+			for (const model of models) {
+				const entry = model as Model<Api>;
+				registeredModels.set(`${providerId}/${entry.id}`, {
+					...entry,
+					provider: providerId,
+					api: config.api as Api,
+					baseUrl: config.baseUrl as string,
+				});
+			}
+		}),
+		setModel: vi.fn(async () => true),
 		on: vi.fn((event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 		}),
 	} as unknown as ExtensionAPI;
-	return { pi, handlers };
+	const modelRegistry = {
+		find: (providerId: string, modelId: string) => registeredModels.get(`${providerId}/${modelId}`),
+	};
+	return { pi, handlers, modelRegistry, registeredModels };
 }
 
 describe("pi 0.82.0 compatibility", () => {
@@ -87,6 +108,81 @@ describe("pi 0.82.0 compatibility", () => {
 				for (const [, config] of (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls) {
 					expect(config).not.toHaveProperty("apiKey");
 				}
+			} finally {
+				fetchMock.mockRestore();
+			}
+		});
+	});
+
+	it("updates the active session model with Fast pricing after /fast", async () => {
+		await withTempAgentDir(async (agentDir) => {
+			writeFileSync(
+				join(agentDir, "cliproxyapi.json"),
+				JSON.stringify({ baseUrl: "http://127.0.0.1:8317", apiKey: "stored-key" }),
+				"utf8",
+			);
+
+			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
+			const { pi, modelRegistry, registeredModels } = createPiMock(commands);
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				if (String(input).startsWith("https://models.dev/")) {
+					return new Response(
+						JSON.stringify({
+							openai: {
+								models: {
+									"gpt-5.6-sol": {
+										cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 },
+										experimental: {
+											modes: {
+												fast: {
+													cost: { input: 10, output: 60, cache_read: 1, cache_write: 12.5 },
+												},
+											},
+										},
+									},
+								},
+							},
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(
+					JSON.stringify({ models: [{ slug: "gpt-5.6-sol", service_tiers: [{ id: "priority" }] }] }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			});
+
+			try {
+				await providerExtension(pi);
+				const currentModel = registeredModels.get("cliproxyapi/gpt-5.6-sol");
+				expect(currentModel?.cost.input).toBe(5);
+				const command = commands.get("fast");
+				if (!command || !currentModel) throw new Error("Fast command or active model is unavailable");
+
+				const ctx = {
+					model: currentModel,
+					modelRegistry,
+					ui: { notify: vi.fn() },
+				} as unknown as ExtensionCommandContext;
+				await command.handler("", ctx);
+
+				expect(pi.setModel).toHaveBeenCalledWith(
+					expect.objectContaining({
+						id: "gpt-5.6-sol",
+						provider: "cliproxyapi",
+						cost: { input: 10, output: 60, cacheRead: 1, cacheWrite: 12.5 },
+					}),
+				);
+
+				const fastModel = (pi.setModel as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Model<Api>;
+				await command.handler("", { ...ctx, model: fastModel });
+				expect(pi.setModel).toHaveBeenLastCalledWith(
+					expect.objectContaining({
+						id: "gpt-5.6-sol",
+						provider: "cliproxyapi",
+						cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+					}),
+				);
 			} finally {
 				fetchMock.mockRestore();
 			}

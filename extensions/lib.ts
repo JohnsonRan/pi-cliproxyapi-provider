@@ -3,6 +3,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 
@@ -23,6 +24,7 @@ export const MODELS_REQUEST_TIMEOUT_MS = 3000;
 
 /** Keep login credentials effectively permanent; reconfigure via /login. */
 export const CREDENTIAL_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
+export const MODELS_DEV_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 export const DEFAULT_MAX_TOKENS = 16384;
@@ -82,12 +84,29 @@ export interface CodexClientModelsResponse {
 	data?: CodexClientModel[];
 }
 
+export interface PiProviderCostTier {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	/** Apply this rate when total input-side usage is above this threshold. */
+	inputTokensAbove: number;
+}
+
+export interface PiProviderCost {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	tiers?: PiProviderCostTier[];
+}
+
 export interface PiProviderModel {
 	id: string;
 	name: string;
 	reasoning: boolean;
 	input: Array<"text" | "image">;
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	cost: PiProviderCost;
 	contextWindow: number;
 	maxTokens: number;
 	thinkingLevelMap?: ThinkingLevelMap;
@@ -98,10 +117,43 @@ export interface MappedModels {
 	fastModelIds: string[];
 	inferenceBaseUrl: string;
 	modelsUrl: string;
+	fastMode?: boolean;
 }
 
 export interface ModelsCacheFile extends MappedModels {
 	fetchedAt: number;
+}
+
+interface ModelsDevCostPayload {
+	input?: unknown;
+	output?: unknown;
+	cache_read?: unknown;
+	cache_write?: unknown;
+	tiers?: unknown;
+	context_over_200k?: unknown;
+}
+
+interface ModelsDevModePayload {
+	cost?: ModelsDevCostPayload;
+}
+
+interface ModelsDevModelPayload {
+	cost?: ModelsDevCostPayload;
+	experimental?: {
+		modes?: Record<string, ModelsDevModePayload | undefined>;
+	};
+}
+
+export interface ModelsDevCostEntry {
+	providerId: string;
+	modelId: string;
+	standard: PiProviderCost;
+	fast?: PiProviderCost;
+}
+
+export interface ModelsDevCostCatalog {
+	exact: Map<string, ModelsDevCostEntry[]>;
+	normalized: Map<string, ModelsDevCostEntry[]>;
 }
 
 export interface OAuthRefreshMeta {
@@ -401,7 +453,11 @@ export function supportsFastServiceTier(model: CodexClientModel): boolean {
 	return Array.isArray(model.service_tiers) && model.service_tiers.length > 0;
 }
 
-export function toPiModel(model: CodexClientModel): PiProviderModel | null {
+export function toPiModel(
+	model: CodexClientModel,
+	costCatalog?: ModelsDevCostCatalog,
+	fastMode = false,
+): PiProviderModel | null {
 	const id = codexModelId(model);
 	if (!id) {
 		return null;
@@ -419,12 +475,16 @@ export function toPiModel(model: CodexClientModel): PiProviderModel | null {
 			: undefined) ??
 		DEFAULT_CONTEXT_WINDOW;
 
+	const cost = costCatalog
+		? matchModelCost(id, costCatalog, fastMode && supportsFastServiceTier(model))
+		: { ...ZERO_COST };
+
 	return {
 		id,
 		name: (model.display_name ?? model.name ?? id).trim() || id,
 		reasoning: hasReasoning,
 		input: buildInputModalities(model),
-		cost: { ...ZERO_COST },
+		cost,
 		contextWindow,
 		maxTokens: DEFAULT_MAX_TOKENS,
 		thinkingLevelMap: buildThinkingLevelMap(efforts),
@@ -496,14 +556,299 @@ export interface ResolvedModelsResult {
 	stale?: boolean;
 }
 
+const MODEL_NAMESPACE_PREFIX =
+	/^(openai|anthropic|google(?:-vertex)?|xai|deepseek|mistral|cohere|zhipuai|moonshotai|minimax|meta)[/:.]/i;
+
+const MODEL_PROVIDER_PREFERENCES: Array<{ pattern: RegExp; providers: string[] }> = [
+	{ pattern: /^(?:gpt-|o[134](?:-|$)|chatgpt-|codex-)/, providers: ["openai", "openai-codex", "opencode"] },
+	{ pattern: /^claude-/, providers: ["anthropic"] },
+	{ pattern: /^(?:gemini-|gemma-)/, providers: ["google", "google-vertex"] },
+	{ pattern: /^grok-/, providers: ["xai"] },
+	{ pattern: /^deepseek-/, providers: ["deepseek"] },
+	{ pattern: /^mistral-/, providers: ["mistral"] },
+	{ pattern: /^command-/, providers: ["cohere"] },
+	{ pattern: /^glm-/, providers: ["zhipuai"] },
+	{ pattern: /^(?:kimi-|moonshot-)/, providers: ["moonshotai"] },
+	{ pattern: /^minimax-/, providers: ["minimax"] },
+	{ pattern: /^llama-/, providers: ["meta"] },
+];
+
+/** Explicit aliases for proxy-specific model ids whose billable base model is known. */
+const MODEL_PRICE_ALIASES: Record<string, string[]> = {
+	"gemini-pro-agent": ["gemini-3.1-pro-preview"],
+	"gemini-3.1-pro-low": ["gemini-3.1-pro-preview"],
+	"gemini-3.6-flash-high": ["gemini-3.6-flash"],
+	"gemini-3-flash-agent": ["gemini-3.5-flash"],
+	"grok-composer-2.5-fast": ["grok-4.3"],
+	"grok-3-mini": ["xai/grok-3-mini"],
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readCostRate(
+	source: Record<string, unknown>,
+	key: "input" | "output" | "cacheRead" | "cacheWrite",
+	fallback: number,
+): number {
+	const rawKey = key === "cacheRead" ? "cache_read" : key === "cacheWrite" ? "cache_write" : key;
+	return finiteNumber(source[key] ?? source[rawKey]) ?? fallback;
+}
+
+function parseModelsDevCost(raw: ModelsDevCostPayload | undefined): PiProviderCost | undefined {
+	if (!raw) return undefined;
+	const source = raw as Record<string, unknown>;
+	const input = finiteNumber(source.input);
+	const output = finiteNumber(source.output);
+	if (input === undefined && output === undefined) return undefined;
+
+	const cost: PiProviderCost = {
+		input: input ?? 0,
+		output: output ?? 0,
+		cacheRead: readCostRate(source, "cacheRead", 0),
+		cacheWrite: readCostRate(source, "cacheWrite", 0),
+	};
+	const tiers = new Map<number, PiProviderCostTier>();
+
+	const addTier = (rawTier: unknown, fallbackThreshold?: number): void => {
+		const tierSource = asRecord(rawTier);
+		if (!tierSource) return;
+		const descriptor = asRecord(tierSource.tier);
+		if (descriptor?.type !== undefined && descriptor.type !== "context") return;
+		const threshold =
+			finiteNumber(tierSource.inputTokensAbove) ?? finiteNumber(descriptor?.size) ?? fallbackThreshold;
+		if (threshold === undefined || threshold <= 0) return;
+		tiers.set(threshold, {
+			input: readCostRate(tierSource, "input", cost.input),
+			output: readCostRate(tierSource, "output", cost.output),
+			cacheRead: readCostRate(tierSource, "cacheRead", cost.cacheRead),
+			cacheWrite: readCostRate(tierSource, "cacheWrite", cost.cacheWrite),
+			inputTokensAbove: threshold,
+		});
+	};
+
+	if (Array.isArray(source.tiers)) {
+		for (const tier of source.tiers) addTier(tier);
+	}
+	if (tiers.size === 0) {
+		// Older models.dev records may expose only this compatibility shortcut.
+		addTier(source.context_over_200k, 200000);
+	}
+	if (tiers.size > 0) {
+		cost.tiers = Array.from(tiers.values()).sort((a, b) => a.inputTokensAbove - b.inputTokensAbove);
+	}
+	return cost;
+}
+
+function cloneCost(cost: PiProviderCost): PiProviderCost {
+	return {
+		input: cost.input,
+		output: cost.output,
+		cacheRead: cost.cacheRead,
+		cacheWrite: cost.cacheWrite,
+		...(cost.tiers ? { tiers: cost.tiers.map((tier) => ({ ...tier })) } : {}),
+	};
+}
+
+function stripModelNamespace(modelId: string): string {
+	return modelId.trim().toLowerCase().replace(MODEL_NAMESPACE_PREFIX, "");
+}
+
+function normalizeModelKey(modelId: string): string {
+	return stripModelNamespace(modelId).replace(/[^a-z0-9]/g, "");
+}
+
+function uniqueStrings(values: string[]): string[] {
+	return Array.from(new Set(values.filter((value) => value.length > 0)));
+}
+
+function preferredProvidersForModel(modelId: string): string[] {
+	const normalizedId = stripModelNamespace(modelId);
+	const namespace = modelId.trim().toLowerCase().match(MODEL_NAMESPACE_PREFIX)?.[1];
+	const familyProviders =
+		MODEL_PROVIDER_PREFERENCES.find(({ pattern }) => pattern.test(normalizedId))?.providers ?? [];
+	return uniqueStrings([namespace ?? "", ...familyProviders]);
+}
+
+function addCatalogEntry(catalog: Map<string, ModelsDevCostEntry[]>, key: string, entry: ModelsDevCostEntry): void {
+	if (!key) return;
+	const entries = catalog.get(key) ?? [];
+	if (!entries.some((candidate) => candidate.providerId === entry.providerId && candidate.modelId === entry.modelId)) {
+		entries.push(entry);
+		catalog.set(key, entries);
+	}
+}
+
+function addModelsDevEntry(catalog: ModelsDevCostCatalog, entry: ModelsDevCostEntry): void {
+	const rawId = entry.modelId.trim().toLowerCase();
+	const strippedId = stripModelNamespace(rawId);
+	for (const key of uniqueStrings([rawId, strippedId])) {
+		addCatalogEntry(catalog.exact, key, entry);
+	}
+	addCatalogEntry(catalog.normalized, normalizeModelKey(rawId), entry);
+}
+
+function sameCostVariants(entries: ModelsDevCostEntry[]): boolean {
+	const fingerprints = new Set(entries.map((entry) => JSON.stringify({ standard: entry.standard, fast: entry.fast })));
+	return fingerprints.size === 1;
+}
+
+function selectModelsDevEntry(entries: ModelsDevCostEntry[], modelId: string): ModelsDevCostEntry | undefined {
+	if (entries.length === 0) return undefined;
+	const preferredProviders = preferredProvidersForModel(modelId);
+	for (const providerId of preferredProviders) {
+		const match = entries.find((entry) => entry.providerId === providerId);
+		if (match) return match;
+	}
+	if (entries.length === 1 || sameCostVariants(entries)) {
+		return [...entries].sort((a, b) => a.providerId.localeCompare(b.providerId))[0];
+	}
+	// Do not silently pick an arbitrary reseller price when the source is ambiguous.
+	return undefined;
+}
+
+function findDirectModelsDevEntry(modelId: string, catalog: ModelsDevCostCatalog): ModelsDevCostEntry | undefined {
+	const rawId = modelId.trim().toLowerCase();
+	const exactKeys = uniqueStrings([rawId, stripModelNamespace(rawId)]);
+	for (const key of exactKeys) {
+		const match = selectModelsDevEntry(catalog.exact.get(key) ?? [], modelId);
+		if (match) return match;
+	}
+	return selectModelsDevEntry(catalog.normalized.get(normalizeModelKey(rawId)) ?? [], modelId);
+}
+
+function findModelsDevEntry(modelId: string, catalog: ModelsDevCostCatalog): ModelsDevCostEntry | undefined {
+	const rawId = modelId.trim().toLowerCase();
+	const lookupIds = uniqueStrings([rawId, ...(MODEL_PRICE_ALIASES[rawId] ?? [])]);
+	for (const lookupId of lookupIds) {
+		const match = findDirectModelsDevEntry(lookupId, catalog);
+		if (match) return match;
+	}
+	return undefined;
+}
+
+interface ModelsDevCacheFile {
+	timestamp: number;
+	providers: Record<string, unknown>;
+}
+
+function getModelsDevCachePath(agentDir?: string): string {
+	if (agentDir?.trim()) {
+		return join(agentDir, "tmp", "models-dev-cache.json");
+	}
+	return join(tmpdir(), "pi-cliproxyapi-models-dev-cache.json");
+}
+
+function readModelsDevCacheFile(cachePath: string): ModelsDevCacheFile | null {
+	try {
+		const raw = readFileSync(cachePath, "utf8");
+		const parsed = asRecord(JSON.parse(raw));
+		if (!parsed || typeof parsed.timestamp !== "number" || !Number.isFinite(parsed.timestamp)) return null;
+		const providers = asRecord(parsed.providers);
+		if (!providers || !isModelsDevProviders(providers)) return null;
+		return { timestamp: parsed.timestamp, providers };
+	} catch {
+		return null;
+	}
+}
+
+function writeModelsDevCacheFile(cachePath: string, providers: Record<string, unknown>): void {
+	try {
+		mkdirSync(dirname(cachePath), { recursive: true });
+		const payload: ModelsDevCacheFile = {
+			timestamp: Date.now(),
+			providers,
+		};
+		writeFileSync(cachePath, JSON.stringify(payload), "utf8");
+	} catch {
+		// Ignore write failure (e.g. read-only filesystem)
+	}
+}
+
+function isModelsDevProviders(value: Record<string, unknown>): boolean {
+	return Object.values(value).some((providerValue) => {
+		const provider = asRecord(providerValue);
+		return asRecord(provider?.models) !== undefined;
+	});
+}
+
+function buildCatalogFromProviders(providers: Record<string, unknown>): ModelsDevCostCatalog {
+	const catalog: ModelsDevCostCatalog = { exact: new Map(), normalized: new Map() };
+	for (const [providerId, providerValue] of Object.entries(providers)) {
+		const provider = asRecord(providerValue);
+		const models = asRecord(provider?.models);
+		if (!models) continue;
+		for (const [modelId, modelValue] of Object.entries(models)) {
+			const model = asRecord(modelValue) as ModelsDevModelPayload | undefined;
+			const standard = parseModelsDevCost(model?.cost);
+			if (!standard) continue;
+			const fast = parseModelsDevCost(model?.experimental?.modes?.fast?.cost);
+			addModelsDevEntry(catalog, { providerId, modelId, standard, fast });
+		}
+	}
+	return catalog;
+}
+
+export async function fetchModelsDevCostMap(agentDir?: string, forceRefresh = false): Promise<ModelsDevCostCatalog> {
+	const cachePath = getModelsDevCachePath(agentDir);
+	const cached = readModelsDevCacheFile(cachePath);
+
+	if (!forceRefresh && cached && Date.now() - cached.timestamp < MODELS_DEV_CACHE_TTL_MS) {
+		return buildCatalogFromProviders(cached.providers);
+	}
+
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), 3000);
+	try {
+		const response = await fetch("https://models.dev/api.json", { signal: controller.signal });
+		if (response.ok) {
+			const providers = asRecord(await response.json());
+			if (providers && isModelsDevProviders(providers)) {
+				writeModelsDevCacheFile(cachePath, providers);
+				return buildCatalogFromProviders(providers);
+			}
+		}
+	} catch {
+		// Retain stale cache if network/JSON fails
+	} finally {
+		clearTimeout(timeoutId);
+	}
+
+	if (cached) {
+		return buildCatalogFromProviders(cached.providers);
+	}
+
+	return { exact: new Map(), normalized: new Map() };
+}
+
+export function matchModelCost(modelId: string, costCatalog: ModelsDevCostCatalog, isFastMode = false): PiProviderCost {
+	const entry = findModelsDevEntry(modelId, costCatalog);
+	if (!entry) return { ...ZERO_COST };
+	return cloneCost(isFastMode && entry.fast ? entry.fast : entry.standard);
+}
+
 export async function loadMappedModels(
 	baseUrlInput: string,
 	apiKey: string,
-	timeoutMs = MODELS_REQUEST_TIMEOUT_MS,
+	timeoutOrFastMode: number | boolean = MODELS_REQUEST_TIMEOUT_MS,
+	agentDir?: string,
 ): Promise<MappedModels> {
+	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
+	const timeoutMs = typeof timeoutOrFastMode === "number" ? timeoutOrFastMode : MODELS_REQUEST_TIMEOUT_MS;
+	const fastMode = pricingEnabled ? timeoutOrFastMode : false;
 	const endpoints = resolveEndpoints(baseUrlInput);
-	const remoteModels = await fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs);
-	const models = remoteModels.map(toPiModel).filter((model): model is PiProviderModel => model !== null);
+	const [remoteModels, costCatalog] = await Promise.all([
+		fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs),
+		pricingEnabled ? fetchModelsDevCostMap(agentDir) : Promise.resolve(undefined),
+	]);
+	const models = remoteModels
+		.map((model) => toPiModel(model, costCatalog, fastMode))
+		.filter((model): model is PiProviderModel => model !== null);
 	const fastModelIds = Array.from(
 		new Set(
 			remoteModels
@@ -519,6 +864,7 @@ export async function loadMappedModels(
 		fastModelIds,
 		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
+		...(pricingEnabled ? { fastMode } : {}),
 	};
 }
 
@@ -531,17 +877,21 @@ export async function resolveMappedModels(
 	agentDir: string,
 	baseUrlInput: string,
 	apiKey: string,
-	options: { forceRefresh?: boolean; timeoutMs?: number } = {},
+	options: { forceRefresh?: boolean; timeoutMs?: number; fastMode?: boolean } = {},
 ): Promise<ResolvedModelsResult> {
+	const cacheMatchesFastMode = (cache: ModelsCacheFile): boolean =>
+		options.fastMode === undefined ? true : (cache.fastMode ?? false) === options.fastMode;
+
 	if (!options.forceRefresh) {
 		const cache = loadModelsCache(agentDir, baseUrlInput);
-		if (cache && isModelsCacheFresh(cache)) {
+		if (cache && isModelsCacheFresh(cache) && cacheMatchesFastMode(cache)) {
 			return { loaded: cache, fromCache: true };
 		}
 	}
 
 	try {
-		const loaded = await loadMappedModels(baseUrlInput, apiKey, options.timeoutMs);
+		const loadArgument = options.fastMode ?? options.timeoutMs ?? MODELS_REQUEST_TIMEOUT_MS;
+		const loaded = await loadMappedModels(baseUrlInput, apiKey, loadArgument, agentDir);
 		saveModelsCache(agentDir, loaded);
 		return { loaded, fromCache: false };
 	} catch (error) {

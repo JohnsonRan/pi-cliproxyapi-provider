@@ -2,13 +2,18 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FastModeController } from "../extensions/fast.ts";
 import { registerFastCommand } from "../extensions/index.ts";
 import { loadConfigFile, resolveFastDefault, saveConfigFile } from "../extensions/lib.ts";
 
-function createCommandHarness(fastMode: FastModeController, currentModel: Model<Api>, agentDir: string) {
+function createCommandHarness(
+	fastMode: FastModeController,
+	currentModel: Model<Api>,
+	agentDir: string,
+	onModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>,
+) {
 	let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
 	const onStatusChange = vi.fn();
 	const notify = vi.fn();
@@ -18,7 +23,7 @@ function createCommandHarness(fastMode: FastModeController, currentModel: Model<
 		}),
 	} as unknown as ExtensionAPI;
 
-	registerFastCommand({ pi, agentDir, providerId: "cliproxyapi", fastMode, onStatusChange });
+	registerFastCommand({ pi, agentDir, providerId: "cliproxyapi", fastMode, onStatusChange, onModeChange });
 
 	const ctx = {
 		model: currentModel,
@@ -136,6 +141,52 @@ describe("/fast command", () => {
 		expect(loadConfigFile(agentDir)).toEqual({ fast: false });
 		expect(harness.onStatusChange).toHaveBeenCalledTimes(2);
 		expect(harness.notify).toHaveBeenLastCalledWith("Fast mode is disabled globally.", "info");
+	});
+
+	it("rejects an overlapping toggle while pricing refresh is in progress", async () => {
+		const agentDir = tempAgentDir();
+		const fastMode = new FastModeController(false);
+		fastMode.setSupportedModelIds([supportedModel.id]);
+		let finishRefresh: (() => void) | undefined;
+		const onModeChange = vi.fn(
+			async () =>
+				await new Promise<void>((resolve) => {
+					finishRefresh = resolve;
+				}),
+		);
+		const harness = createCommandHarness(fastMode, supportedModel, agentDir, onModeChange);
+
+		const firstToggle = harness.command().handler("", harness.ctx);
+		await vi.waitFor(() => expect(onModeChange).toHaveBeenCalledTimes(1));
+		await harness.command().handler("", harness.ctx);
+
+		expect(fastMode.isEnabled()).toBe(true);
+		expect(loadConfigFile(agentDir)).toEqual({ fast: true });
+		expect(onModeChange).toHaveBeenCalledTimes(1);
+		expect(harness.notify).toHaveBeenCalledWith(
+			"Fast mode is already being refreshed. Try again when it finishes.",
+			"warning",
+		);
+
+		finishRefresh?.();
+		await firstToggle;
+	});
+
+	it("restores state, config, and pricing metadata when refresh fails", async () => {
+		const agentDir = tempAgentDir();
+		const fastMode = new FastModeController(false);
+		fastMode.setSupportedModelIds([supportedModel.id]);
+		const onModeChange = vi.fn(async (enabled: boolean) => {
+			if (enabled) throw new Error("refresh failed");
+		});
+		const harness = createCommandHarness(fastMode, supportedModel, agentDir, onModeChange);
+
+		await harness.command().handler("", harness.ctx);
+
+		expect(fastMode.isEnabled()).toBe(false);
+		expect(loadConfigFile(agentDir)).toEqual({ fast: false });
+		expect(onModeChange.mock.calls.map(([enabled]) => enabled)).toEqual([true, false]);
+		expect(harness.notify).toHaveBeenCalledWith("Failed to refresh model pricing: refresh failed", "warning");
 	});
 
 	it("does not change in-memory state when the global config cannot be written", async () => {

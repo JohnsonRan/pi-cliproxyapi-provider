@@ -140,11 +140,25 @@ async function configureAndRegister(options: {
 	defaultBaseUrl: string;
 	streamSimple: CliproxyCodexStreamSimple;
 	fastMode: FastModeController;
+	onFastModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }): Promise<{ modelCount: number; modelsUrl: string }> {
-	const { pi, agentDir, providerId, providerName, baseUrlInput, apiKey, defaultBaseUrl, streamSimple, fastMode } =
-		options;
+	const {
+		pi,
+		agentDir,
+		providerId,
+		providerName,
+		baseUrlInput,
+		apiKey,
+		defaultBaseUrl,
+		streamSimple,
+		fastMode,
+		onFastModeChange,
+	} = options;
 
-	const { loaded } = await resolveMappedModels(agentDir, baseUrlInput, apiKey, { forceRefresh: true });
+	const { loaded } = await resolveMappedModels(agentDir, baseUrlInput, apiKey, {
+		forceRefresh: true,
+		fastMode: fastMode.isEnabled(),
+	});
 
 	try {
 		saveConfigFile(agentDir, {
@@ -168,6 +182,7 @@ async function configureAndRegister(options: {
 		agentDir,
 		streamSimple,
 		fastMode,
+		onFastModeChange,
 	});
 	fastMode.setSupportedModelIds(loaded.fastModelIds);
 
@@ -182,8 +197,9 @@ function createOAuthHandlers(options: {
 	defaultBaseUrl: string;
 	streamSimple: CliproxyCodexStreamSimple;
 	fastMode: FastModeController;
+	onFastModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }) {
-	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode } = options;
+	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode, onFastModeChange } = options;
 
 	return {
 		name: providerName,
@@ -210,6 +226,7 @@ function createOAuthHandlers(options: {
 						defaultBaseUrl,
 						streamSimple,
 						fastMode,
+						onFastModeChange,
 					});
 
 					logInfo(`login ok: registered ${result.modelCount} models from ${result.modelsUrl}`);
@@ -269,10 +286,21 @@ function registerProvider(
 		agentDir: string;
 		streamSimple: CliproxyCodexStreamSimple;
 		fastMode: FastModeController;
+		onFastModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 	},
 ): void {
-	const { providerId, providerName, baseUrlInput, apiKey, models, defaultBaseUrl, agentDir, streamSimple, fastMode } =
-		options;
+	const {
+		providerId,
+		providerName,
+		baseUrlInput,
+		apiKey,
+		models,
+		defaultBaseUrl,
+		agentDir,
+		streamSimple,
+		fastMode,
+		onFastModeChange,
+	} = options;
 
 	const endpoints = resolveEndpoints(baseUrlInput);
 	const oauth = createOAuthHandlers({
@@ -283,6 +311,7 @@ function registerProvider(
 		defaultBaseUrl,
 		streamSimple,
 		fastMode,
+		onFastModeChange,
 	});
 
 	// Replace any previous registration so an earlier ambient apiKey does not linger
@@ -309,8 +338,10 @@ export function registerFastCommand(options: {
 	providerId: string;
 	fastMode: FastModeController;
 	onStatusChange?: (ctx: ExtensionContext) => void;
+	onModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }): void {
-	const { pi, agentDir, providerId, fastMode, onStatusChange } = options;
+	const { pi, agentDir, providerId, fastMode, onStatusChange, onModeChange } = options;
+	let modeChangeInProgress = false;
 
 	pi.registerCommand("fast", {
 		description: "Toggle CLIProxyAPI Fast mode globally.",
@@ -319,25 +350,62 @@ export function registerFastCommand(options: {
 				ctx.ui.notify("Usage: /fast", "error");
 				return;
 			}
-
-			const enabled = !fastMode.isEnabled();
-			try {
-				saveConfigFile(agentDir, { fast: enabled });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
+			if (modeChangeInProgress) {
+				ctx.ui.notify("Fast mode is already being refreshed. Try again when it finishes.", "warning");
 				return;
 			}
-			fastMode.setEnabled(enabled);
-			onStatusChange?.(ctx);
 
-			const currentModel = ctx.model;
-			if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
-				if (enabled) {
-					ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
-				} else {
-					ctx.ui.notify("Fast mode is disabled globally.", "info");
+			modeChangeInProgress = true;
+			try {
+				const previousEnabled = fastMode.isEnabled();
+				const enabled = !previousEnabled;
+				try {
+					saveConfigFile(agentDir, { fast: enabled });
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
+					return;
 				}
+				fastMode.setEnabled(enabled);
+				try {
+					await onModeChange?.(enabled, ctx);
+				} catch (error) {
+					// Restore all three views of the mode after a partial refresh:
+					// in-memory request behavior, persisted preference, and model metadata.
+					fastMode.setEnabled(previousEnabled);
+					const rollbackErrors: string[] = [];
+					try {
+						saveConfigFile(agentDir, { fast: previousEnabled });
+					} catch (rollbackError) {
+						rollbackErrors.push(
+							`config rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+						);
+					}
+					try {
+						await onModeChange?.(previousEnabled, ctx);
+					} catch (rollbackError) {
+						rollbackErrors.push(
+							`pricing rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+						);
+					}
+					const message = error instanceof Error ? error.message : String(error);
+					const rollbackSuffix = rollbackErrors.length > 0 ? ` (${rollbackErrors.join("; ")})` : "";
+					ctx.ui.notify(`Failed to refresh model pricing: ${message}${rollbackSuffix}`, "warning");
+					onStatusChange?.(ctx);
+					return;
+				}
+				onStatusChange?.(ctx);
+
+				const currentModel = ctx.model;
+				if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
+					if (enabled) {
+						ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
+					} else {
+						ctx.ui.notify("Fast mode is disabled globally.", "info");
+					}
+				}
+			} finally {
+				modeChangeInProgress = false;
 			}
 		},
 	});
@@ -374,6 +442,7 @@ export function registerRefreshCommand(options: {
 			try {
 				const { loaded } = await resolveMappedModels(agentDir, connection.baseUrlInput, connection.apiKey, {
 					forceRefresh: true,
+					fastMode: fastMode.isEnabled(),
 				});
 				fastMode.setSupportedModelIds(loaded.fastModelIds);
 
@@ -433,12 +502,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
 		proactiveCompaction.getCompactionSettings(),
 	);
+	let refreshModelsForFast: ((ctx: ExtensionContext) => Promise<void>) | undefined;
+	const onFastModeChange = async (_enabled: boolean, ctx: ExtensionContext): Promise<void> => {
+		await refreshModelsForFast?.(ctx);
+	};
 	registerFastCommand({
 		pi,
 		agentDir,
 		providerId: identity.providerId,
 		fastMode,
 		onStatusChange: (ctx) => fastFooter.refresh(ctx),
+		onModeChange: onFastModeChange,
 	});
 	registerRefreshCommand({
 		pi,
@@ -460,24 +534,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		agentDir,
 		streamSimple,
 		fastMode,
+		onFastModeChange: onFastModeChange,
 	});
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
 
 	const connection = resolveConnection(agentDir, identity.providerId);
-	if (!connection) {
-		logInfo(
-			`not configured yet. Use /login ${identity.providerName} or /login ${identity.providerId}. ` +
-				`Menu path: /login → Sign in with an account → ${identity.providerName}. ` +
-				`Or set ${CONFIG_FILE_NAME} / CLIPROXYAPI_API_KEY.`,
-		);
-		return;
-	}
-
-	try {
+	const registerConfiguredProvider = async (
+		currentConnection: NonNullable<ReturnType<typeof resolveConnection>>,
+	): Promise<void> => {
 		const { loaded, fromCache, stale } = await resolveMappedModels(
 			agentDir,
-			connection.baseUrlInput,
-			connection.apiKey,
+			currentConnection.baseUrlInput,
+			currentConnection.apiKey,
+			{ fastMode: fastMode.isEnabled() },
 		);
 		fastMode.setSupportedModelIds(loaded.fastModelIds);
 
@@ -488,7 +557,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					`use /cliproxyapi-refresh to update.`,
 			);
 		}
-
 		// Prefer OAuth-only registration when /login already stored credentials so
 		// `/login <provider>` jumps straight into the multi-field flow. Fall back to
 		// ambient apiKey only for config-file / env setups without auth.json.
@@ -496,14 +564,45 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		registerProvider(pi, {
 			providerId: identity.providerId,
 			providerName: identity.providerName,
-			baseUrlInput: connection.baseUrlInput,
-			apiKey: hasStoredLogin ? undefined : connection.apiKey,
+			baseUrlInput: currentConnection.baseUrlInput,
+			apiKey: hasStoredLogin ? undefined : currentConnection.apiKey,
 			models: loaded.models,
 			defaultBaseUrl,
 			agentDir,
 			streamSimple,
 			fastMode,
+			onFastModeChange,
 		});
+	};
+	refreshModelsForFast = async (ctx: ExtensionContext): Promise<void> => {
+		const currentConnection = resolveConnection(agentDir, identity.providerId);
+		if (!currentConnection) return;
+
+		await registerConfiguredProvider(currentConnection);
+		const currentModel = ctx.model;
+		if (!currentModel || currentModel.provider !== identity.providerId) return;
+
+		const refreshedModel = ctx.modelRegistry.find(identity.providerId, currentModel.id);
+		if (!refreshedModel) {
+			throw new Error(`Refreshed model ${identity.providerId}/${currentModel.id} is unavailable`);
+		}
+		if (JSON.stringify(refreshedModel.cost) === JSON.stringify(currentModel.cost)) return;
+		if (!(await pi.setModel(refreshedModel))) {
+			throw new Error(`Unable to activate refreshed model ${identity.providerId}/${currentModel.id}`);
+		}
+	};
+
+	if (!connection) {
+		logInfo(
+			`not configured yet. Use /login ${identity.providerName} or /login ${identity.providerId}. ` +
+				`Menu path: /login → Sign in with an account → ${identity.providerName}. ` +
+				`Or set ${CONFIG_FILE_NAME} / CLIPROXYAPI_API_KEY.`,
+		);
+		return;
+	}
+
+	try {
+		await registerConfiguredProvider(connection);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (isUnauthorizedModelsError(error)) {

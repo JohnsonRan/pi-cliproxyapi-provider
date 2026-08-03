@@ -34,12 +34,13 @@ import {
 	isUnauthorizedModelsError,
 	loadAuthConnection,
 	loadConfigFile,
-	loadMappedModels,
+	type ModelsCacheFile,
 	type PiProviderModel,
 	resolveConnection,
 	resolveEndpoints,
 	resolveFastDefault,
 	resolveIdentity,
+	resolveMappedModels,
 	saveConfigFile,
 } from "./lib.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
@@ -143,7 +144,7 @@ async function configureAndRegister(options: {
 	const { pi, agentDir, providerId, providerName, baseUrlInput, apiKey, defaultBaseUrl, streamSimple, fastMode } =
 		options;
 
-	const loaded = await loadMappedModels(baseUrlInput, apiKey);
+	const { loaded } = await resolveMappedModels(agentDir, baseUrlInput, apiKey, { forceRefresh: true });
 
 	try {
 		saveConfigFile(agentDir, {
@@ -342,6 +343,62 @@ export function registerFastCommand(options: {
 	});
 }
 
+export function registerRefreshCommand(options: {
+	pi: ExtensionAPI;
+	agentDir: string;
+	providerId: string;
+	providerName: string;
+	defaultBaseUrl: string;
+	streamSimple: CliproxyCodexStreamSimple;
+	fastMode: FastModeController;
+}): void {
+	const { pi, agentDir, providerId, providerName, defaultBaseUrl, streamSimple, fastMode } = options;
+
+	pi.registerCommand("cliproxyapi-refresh", {
+		description: "Force refresh CLIProxyAPI models from the remote catalog.",
+		handler: async (args, ctx) => {
+			if (args.trim()) {
+				ctx.ui.notify("Usage: /cliproxyapi-refresh", "error");
+				return;
+			}
+
+			const connection = resolveConnection(agentDir, providerId);
+			if (!connection) {
+				ctx.ui.notify(
+					`CLIProxyAPI is not configured. Use /login ${providerName} or /login ${providerId}.`,
+					"error",
+				);
+				return;
+			}
+
+			try {
+				const { loaded } = await resolveMappedModels(agentDir, connection.baseUrlInput, connection.apiKey, {
+					forceRefresh: true,
+				});
+				fastMode.setSupportedModelIds(loaded.fastModelIds);
+
+				const hasStoredLogin = hasLoginCredential(agentDir, providerId);
+				registerProvider(pi, {
+					providerId,
+					providerName,
+					baseUrlInput: connection.baseUrlInput,
+					apiKey: hasStoredLogin ? undefined : connection.apiKey,
+					models: loaded.models,
+					defaultBaseUrl,
+					agentDir,
+					streamSimple,
+					fastMode,
+				});
+
+				ctx.ui.notify(`Refreshed ${loaded.models.length} CLIProxyAPI models from ${loaded.modelsUrl}.`, "info");
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Failed to refresh CLIProxyAPI models: ${message}`, "error");
+			}
+		},
+	});
+}
+
 export { CLIPROXYAPI_CODEX_API } from "./codex-stream.ts";
 export { resolveEndpoints, toPiModel } from "./lib.ts";
 
@@ -383,6 +440,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		fastMode,
 		onStatusChange: (ctx) => fastFooter.refresh(ctx),
 	});
+	registerRefreshCommand({
+		pi,
+		agentDir,
+		providerId: identity.providerId,
+		providerName: identity.providerName,
+		defaultBaseUrl,
+		streamSimple,
+		fastMode,
+	});
 	fastFooter.register(pi);
 
 	// Always register oauth so the provider is visible in /login immediately after install.
@@ -408,8 +474,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	}
 
 	try {
-		const loaded = await loadMappedModels(connection.baseUrlInput, connection.apiKey);
+		const { loaded, fromCache, stale } = await resolveMappedModels(
+			agentDir,
+			connection.baseUrlInput,
+			connection.apiKey,
+		);
 		fastMode.setSupportedModelIds(loaded.fastModelIds);
+
+		if (fromCache && stale) {
+			const fetchedAt = (loaded as ModelsCacheFile).fetchedAt;
+			logWarn(
+				`using stale model cache from ${new Date(fetchedAt).toISOString()}; ` +
+					`use /cliproxyapi-refresh to update.`,
+			);
+		}
+
 		// Prefer OAuth-only registration when /login already stored credentials so
 		// `/login <provider>` jumps straight into the multi-field flow. Fall back to
 		// ambient apiKey only for config-file / env setups without auth.json.

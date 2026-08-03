@@ -71,7 +71,9 @@ describe("pi 0.82.0 compatibility", () => {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).not.toHaveBeenCalled();
 
-				expect([...commands.keys()]).toEqual(["fast"]);
+				expect(commands.size).toBe(2);
+				expect(commands.has("fast")).toBe(true);
+				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.unregisterProvider).toHaveBeenCalledWith("cliproxyapi");
 				expect(pi.registerProvider).toHaveBeenCalledWith(
@@ -123,7 +125,9 @@ describe("pi 0.82.0 compatibility", () => {
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).toHaveBeenCalled();
-				expect([...commands.keys()]).toEqual(["fast"]);
+				expect(commands.size).toBe(2);
+				expect(commands.has("fast")).toBe(true);
+				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.registerProvider).toHaveBeenCalledWith(
 					"cliproxyapi",

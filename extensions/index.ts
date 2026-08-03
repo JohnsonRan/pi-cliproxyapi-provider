@@ -40,8 +40,11 @@ import {
 	resolveFastDefault,
 	resolveIdentity,
 	resolveMappedModels,
+	resolvePauseDefault,
 	saveConfigFile,
 } from "./lib.ts";
+import type { PauseController } from "./pause.ts";
+import { pauseController, waitForPauseToEnd } from "./pause.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
 
 class ConfigPersistenceError extends Error {
@@ -377,6 +380,54 @@ function registerProvider(
 	});
 }
 
+export function registerPauseCommands(options: {
+	pi: ExtensionAPI;
+	agentDir: string;
+	pauseMode: PauseController;
+}): void {
+	const { pi, agentDir, pauseMode } = options;
+
+	const setPause = async (
+		enabled: boolean,
+		commandName: string,
+		args: string,
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		if (args.trim()) {
+			ctx.ui.notify(`Usage: /${commandName}`, "error");
+			return;
+		}
+
+		try {
+			saveConfigFile(agentDir, { pause: enabled });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Failed to save pause mode: ${message}`, "error");
+			return;
+		}
+
+		pauseMode.setEnabled(enabled);
+		ctx.ui.notify(enabled ? "Requests are paused." : "Requests are continued.", "info");
+	};
+
+	pi.registerCommand("pause", {
+		description: "Pause provider requests until /continue is used.",
+		handler: async (args, ctx) => setPause(true, "pause", args, ctx),
+	});
+
+	pi.registerCommand("continue", {
+		description: "Continue provider requests paused by /pause.",
+		handler: async (args, ctx) => setPause(false, "continue", args, ctx),
+	});
+}
+
+export function registerPauseGuard(options: { pi: ExtensionAPI; agentDir: string; pauseMode: PauseController }): void {
+	const { pi, agentDir, pauseMode } = options;
+	pi.on("before_provider_request", async () => {
+		await waitForPauseToEnd(agentDir, pauseMode);
+	});
+}
+
 export function registerFastCommand(options: {
 	pi: ExtensionAPI;
 	agentDir: string;
@@ -545,6 +596,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const agentDir = getAgentDir();
 	const identity = resolveIdentity(agentDir);
 	const defaultBaseUrl = resolveDefaultBaseUrl(agentDir, identity.providerId);
+
+	let pauseEnabled = false;
+	try {
+		pauseEnabled = resolvePauseDefault(agentDir);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logWarn(`invalid pause configuration (${message}); using pause=false`);
+	}
+	pauseController.setEnabled(pauseEnabled);
+	registerPauseCommands({ pi, agentDir, pauseMode: pauseController });
+	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
+
 	const proactiveCompaction = new ProactiveCompactionController(agentDir, identity.providerId);
 	proactiveCompaction.register(pi);
 

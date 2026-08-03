@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { pauseController } from "./pause.ts";
 
 const STATUS_KEY = "tps";
 const REFRESH_INTERVAL_MS = 1000;
@@ -22,6 +23,8 @@ function isPrimaryUiSession(ctx: ExtensionContext): boolean {
 
 export default function (pi: ExtensionAPI) {
 	let requestStartMs: number | null = null;
+	let pausedDurationAtStartMs = 0;
+	let pauseWasEnabledAtStart = false;
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	let statusCtx: ExtensionContext | null = null;
 	let input = 0;
@@ -36,9 +39,20 @@ export default function (pi: ExtensionAPI) {
 		refreshTimer = undefined;
 	}
 
-	function getElapsedSeconds(): number {
+	function getElapsedMs(now = Date.now()): number {
 		if (requestStartMs === null) return 0;
-		return Math.floor((Date.now() - requestStartMs) / 1000);
+
+		// A pause issued during an active run only gates the next provider request.
+		// Keep the current run's elapsed time moving until it settles; a pause that
+		// was already active when the run started still excludes its waiting time.
+		if (!pauseWasEnabledAtStart) {
+			return Math.max(0, now - requestStartMs);
+		}
+		return pauseController.getElapsedMs(requestStartMs, pausedDurationAtStartMs, now);
+	}
+
+	function getElapsedSeconds(): number {
+		return Math.floor(getElapsedMs() / 1000);
 	}
 
 	function formatElapsed(totalSeconds: number): string {
@@ -95,7 +109,10 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		requestStartMs = Date.now();
+		const startMs = Date.now();
+		requestStartMs = startMs;
+		pauseWasEnabledAtStart = pauseController.isEnabled();
+		pausedDurationAtStartMs = pauseController.getPausedDurationMs(startMs);
 		statusCtx = ctx;
 		input = 0;
 		output = 0;
@@ -128,7 +145,7 @@ export default function (pi: ExtensionAPI) {
 		if (!isPrimaryUiSession(ctx)) return;
 		if (requestStartMs === null) return;
 
-		const elapsedMs = Date.now() - requestStartMs;
+		const elapsedMs = getElapsedMs();
 		const elapsedSecondsExact = elapsedMs / 1000;
 		const elapsedSecondsFloor = Math.floor(elapsedSecondsExact);
 
@@ -155,6 +172,8 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (statusCtx === ctx) {
 			requestStartMs = null;
+			pausedDurationAtStartMs = 0;
+			pauseWasEnabledAtStart = false;
 			statusCtx = null;
 		}
 	});

@@ -84,7 +84,8 @@ You can still configure without `/login`.
 {
   "baseUrl": "http://127.0.0.1:8317",
   "apiKey": "12345",
-  "fast": false
+  "fast": false,
+  "pause": false
 }
 ```
 
@@ -97,6 +98,7 @@ Optional fields:
 | `providerId` | `cliproxyapi` | Provider id shown in `/model` |
 | `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
+| `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
 
 ### Environment overrides
 
@@ -145,6 +147,22 @@ Each invocation switches Fast between on and off and writes the result to `~/.pi
 When Fast is effective, pi's model status appends a yellow lowercase `fast`, for example `gpt-5.6-sol • xhigh • fast`. When Fast is off or the selected model is unsupported, the original model status remains unchanged. Supported models do not produce a separate status notification. Running `/fast` with an unsupported model still updates the global preference; enabling it warns that the current model cannot use Fast.
 
 Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast injects `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level. When `models.dev` provides `experimental.modes.fast.cost`, the registered model cost switches to those Fast rates as well; the provider is refreshed when `/fast` is toggled. If no Fast price is published, the standard price is retained. The plugin does not guess Fast prices from `-pro`/`-fast` model IDs.
+
+## Pausing provider requests
+
+Pause provider requests with:
+
+```text
+/pause
+```
+
+Use `/continue` to clear the pause:
+
+```text
+/continue
+```
+
+Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
 
 ## Model cache
 

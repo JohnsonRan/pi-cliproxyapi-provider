@@ -37,6 +37,7 @@ export interface CliproxyConfigFile {
 	providerId?: string;
 	providerName?: string;
 	fast?: boolean;
+	pause?: boolean;
 }
 
 export interface ResolvedIdentity {
@@ -356,6 +357,18 @@ export function resolveFastDefault(agentDir: string): boolean {
 		throw new Error(`${CONFIG_FILE_NAME} field "fast" must be a boolean`);
 	}
 	return file.fast;
+}
+
+/** Resolve the request pause preference from cliproxyapi.json, defaulting to false. */
+export function resolvePauseDefault(agentDir: string): boolean {
+	const file = loadConfigFile(agentDir);
+	if (file.pause === undefined) {
+		return false;
+	}
+	if (typeof file.pause !== "boolean") {
+		throw new Error(`${CONFIG_FILE_NAME} field "pause" must be a boolean`);
+	}
+	return file.pause;
 }
 
 /**

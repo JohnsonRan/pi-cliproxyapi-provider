@@ -14,6 +14,7 @@ import {
 import { FastModeController } from "../extensions/fast.ts";
 import { FastFooterController, formatFastModelStatus } from "../extensions/fast-footer.ts";
 import { loadMappedModels } from "../extensions/lib.ts";
+import { PauseController } from "../extensions/pause.ts";
 
 const model = {
 	id: "gpt-5.4",
@@ -73,8 +74,11 @@ describe("FastModeController", () => {
 });
 
 describe("Fast footer model status", () => {
-	it("appends lowercase fast after the reasoning level only while Fast is effective", () => {
+	it("appends Fast and paused labels at the right side of model status", () => {
 		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", true)).toBe("gpt-5.6-sol • xhigh • fast");
+		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", true, "fast", true)).toBe(
+			"gpt-5.6-sol • xhigh • fast • paused",
+		);
 		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", false)).toBe("gpt-5.6-sol • xhigh");
 	});
 
@@ -114,6 +118,7 @@ describe("Fast footer model status", () => {
 		const fastMode = new FastModeController(false);
 		fastMode.setSupportedModelIds([model.id]);
 		fastMode.setEnabled(true);
+		const pauseMode = new PauseController(false);
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const pi = {
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
@@ -126,7 +131,7 @@ describe("Fast footer model status", () => {
 				},
 			},
 		} as unknown as ExtensionContext;
-		const footer = new FastFooterController(model.provider, fastMode);
+		const footer = new FastFooterController(model.provider, fastMode, () => undefined, pauseMode);
 		const component = Object.create(FooterComponent.prototype) as FooterComponent;
 		Object.defineProperty(component, "session", {
 			value: { state: { model: displayModel, thinkingLevel: "xhigh" } },
@@ -145,11 +150,24 @@ describe("Fast footer model status", () => {
 				contextWindow: 372000,
 			});
 
+			pauseMode.setEnabled(true);
+			expect(component.render(80)).toEqual([
+				"gpt-5.4 • xhigh • <yellow>fast</yellow> • <yellow>paused</yellow>|false",
+			]);
+			pauseMode.setEnabled(false);
 			fastMode.setEnabled(false);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
+
+			pauseMode.setEnabled(true);
+			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>paused</yellow>|false"]);
+			pauseMode.setEnabled(false);
 			fastMode.setEnabled(true);
 			fastMode.setSupportedModelIds([]);
 			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
+
+			pauseMode.setEnabled(true);
+			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>paused</yellow>|false"]);
+			pauseMode.setEnabled(false);
 			fastMode.setSupportedModelIds([model.id]);
 
 			expect(() => component.render(-1)).toThrow("render failed");

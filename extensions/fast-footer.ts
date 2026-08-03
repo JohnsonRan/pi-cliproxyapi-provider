@@ -1,6 +1,7 @@
 import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
 import type { ProactiveCompactionSettings } from "./auto-compact.ts";
 import type { FastModeController } from "./fast.ts";
+import { type PauseController, pauseController } from "./pause.ts";
 
 const FAST_FOOTER_PATCH = Symbol.for("@router-for-me/pi-cliproxyapi-provider/fast-footer-patch");
 const FAST_REFRESH_STATUS_KEY = "cliproxyapi-fast-refresh";
@@ -40,6 +41,8 @@ export function formatFastModelStatus(
 	thinkingLevel: string,
 	fastEnabled: boolean,
 	fastLabel = "fast",
+	paused = false,
+	pausedLabel = "paused",
 ): string {
 	let status = modelName;
 	if (supportsReasoning) {
@@ -47,6 +50,9 @@ export function formatFastModelStatus(
 	}
 	if (fastEnabled) {
 		status += ` • ${fastLabel}`;
+	}
+	if (paused) {
+		status += ` • ${pausedLabel}`;
 	}
 	return status;
 }
@@ -79,11 +85,13 @@ function installFooterPatch(controller: FastFooterController): void {
 				const originalId = model.id;
 				const originalReasoning = model.reasoning;
 				const originalContextWindow = model.contextWindow;
-				if (activeController.isEffectiveFor(model)) {
+				const fastEnabled = activeController.isEffectiveFor(model);
+				if (fastEnabled || activeController.isPaused()) {
 					model.id = activeController.formatModelStatus(
 						originalId,
 						originalReasoning,
 						session?.state.thinkingLevel ?? "off",
+						fastEnabled,
 					);
 					model.reasoning = false;
 				}
@@ -128,6 +136,7 @@ export class FastFooterController {
 		private readonly providerId: string,
 		private readonly fastMode: FastModeController,
 		private readonly resolveCompactionSettings: () => ProactiveCompactionSettings | undefined = () => undefined,
+		private readonly pauseMode: PauseController = pauseController,
 	) {}
 
 	register(pi: ExtensionAPI): void {
@@ -146,9 +155,19 @@ export class FastFooterController {
 		});
 	}
 
-	formatModelStatus(modelName: string, supportsReasoning: boolean, thinkingLevel: string): string {
-		const fastLabel = this.activeContext?.ui.theme.fg("warning", "fast") ?? "fast";
-		return formatFastModelStatus(modelName, supportsReasoning, thinkingLevel, true, fastLabel);
+	formatModelStatus(modelName: string, supportsReasoning: boolean, thinkingLevel: string, fastEnabled = true): string {
+		const theme = this.activeContext?.ui.theme;
+		const fastLabel = theme?.fg("warning", "fast") ?? "fast";
+		const pausedLabel = theme?.fg("warning", "paused") ?? "paused";
+		return formatFastModelStatus(
+			modelName,
+			supportsReasoning,
+			thinkingLevel,
+			fastEnabled,
+			fastLabel,
+			this.pauseMode.isEnabled(),
+			pausedLabel,
+		);
 	}
 
 	isProviderModel(model: MutableModel): boolean {
@@ -157,6 +176,10 @@ export class FastFooterController {
 
 	isEffectiveFor(model: MutableModel): boolean {
 		return this.isProviderModel(model) && this.fastMode.isEffectiveFor(model.id);
+	}
+
+	isPaused(): boolean {
+		return this.pauseMode.isEnabled();
 	}
 
 	getDisplayContextWindow(contextWindow: number, autoCompactEnabled: boolean): number {

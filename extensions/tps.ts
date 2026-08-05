@@ -126,9 +126,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", (event, ctx) => {
+		if (requestStartMs === null) return;
 		// Ignore usage from subagent / non-TUI sessions.
 		if (!isPrimaryUiSession(ctx)) return;
-		if (requestStartMs === null) return;
 
 		for (const message of event.messages) {
 			if (!isAssistantMessage(message)) continue;
@@ -141,9 +141,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		if (requestStartMs === null) return;
 		// Subagents must never clear the parent elapsed status or notify TPS.
 		if (!isPrimaryUiSession(ctx)) return;
-		if (requestStartMs === null) return;
 
 		const elapsedMs = getElapsedMs();
 		const elapsedSecondsExact = elapsedMs / 1000;
@@ -164,17 +164,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		if (statusCtx !== ctx && !isPrimaryUiSession(ctx)) return;
-
 		clearRefreshTimer();
-		if (isPrimaryUiSession(ctx)) {
-			clearStatus(ctx);
-		}
-		if (statusCtx === ctx) {
-			requestStartMs = null;
-			pausedDurationAtStartMs = 0;
-			pauseWasEnabledAtStart = false;
-			statusCtx = null;
-		}
+		clearStatus(ctx);
+		requestStartMs = null;
+		pausedDurationAtStartMs = 0;
+		pauseWasEnabledAtStart = false;
+		statusCtx = null;
 	});
 }

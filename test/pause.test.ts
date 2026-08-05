@@ -133,4 +133,39 @@ describe("Elapsed timer", () => {
 		expect(setStatus).toHaveBeenLastCalledWith("tps", "Elapsed 6s");
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining(", 6.0s"), "info");
 	});
+
+	it("ignores late agent events after session shutdown", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		pauseController.setEnabled(false);
+
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+		const setStatus = vi.fn();
+		const notify = vi.fn();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+				handlers.set(event, handler);
+			},
+		} as unknown as ExtensionAPI;
+		const ui = {
+			notify,
+			setStatus,
+			theme: { fg: (_color: string, text: string) => text },
+		};
+		const activeCtx = { hasUI: true, mode: "tui", ui } as unknown as ExtensionContext;
+		const shutdownCtx = { hasUI: true, mode: "tui", ui } as unknown as ExtensionContext;
+		const staleCtx = new Proxy({} as ExtensionContext, {
+			get() {
+				throw new Error("stale context");
+			},
+		});
+
+		tpsExtension(pi);
+		await handlers.get("before_agent_start")?.({}, activeCtx);
+		await handlers.get("session_shutdown")?.({}, shutdownCtx);
+
+		expect(() => handlers.get("agent_end")?.({ messages: [] }, staleCtx)).not.toThrow();
+		expect(() => handlers.get("agent_settled")?.({}, staleCtx)).not.toThrow();
+		expect(setStatus).toHaveBeenLastCalledWith("tps", undefined);
+	});
 });

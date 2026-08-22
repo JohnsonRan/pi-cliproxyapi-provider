@@ -2,9 +2,21 @@
 
 Pi provider extension that discovers models from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and registers them for use in pi. It supports catalog-driven OpenAI Fast mode and also ships a small TUI helper that shows elapsed runtime and a TPS summary after each agent turn.
 
+## Differences from upstream
+
+Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider), this fork:
+
+- uses Pi's native API-key login and stores credentials only in `auth.json`;
+- standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
+- adds configurable `websocket`, `websocket-cached`, `auto`, and `sse` transports, with persistent WebSocket as the default;
+- resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
+- improves catalog mapping with native model refresh, opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
+
+Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex client protocol to the configured backend. Keeping one client protocol avoids unreliable origin inference and preserves the Codex-specific WebSocket, compaction, Fast, and tool behavior used by this extension.
+
 ## What it does
 
-1. Registers a provider that always appears in `/login` (account sign-in path).
+1. Registers a native API-key provider that always appears in `/login`.
 2. Interactive setup collects `baseUrl` + `apiKey` via `/login CLIProxyAPI` or `/login cliproxyapi`.
 3. Fetches `{root}/v1/models?client_version=pi`.
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
@@ -29,7 +41,7 @@ pi -e /absolute/path/to/pi-cliproxyapi-provider
 
 ## Login-style setup (recommended)
 
-This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so CLIProxyAPI appears under **Sign in with an account** (not API key).
+This plugin uses Pi's native API-key authentication while prompting for both **baseUrl** and **apiKey**.
 
 ### Preferred: /login shortcuts
 
@@ -43,7 +55,7 @@ or:
 /login cliproxyapi
 ```
 
-These shortcuts jump straight into CLIProxyAPI's multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
+These shortcuts jump straight into CLIProxyAPI's baseUrl + API key prompts.
 
 ### Menu path
 
@@ -51,12 +63,7 @@ These shortcuts jump straight into CLIProxyAPI's multi-field baseUrl + API key p
 /login
 ```
 
-Then choose:
-
-1. **Sign in with an account**
-   (required for multi-field baseUrl + API key prompts)
-2. **CLIProxyAPI**
-3. Enter:
+Then choose **CLIProxyAPI** from API-key providers and enter:
    - base URL — preferred form is host:port, e.g. `http://127.0.0.1:8317`
    - API key
 
@@ -68,10 +75,10 @@ Final login validation calls `{root}/v1/models?client_version=pi` (this always b
 On success:
 
 - models are registered immediately in the current session (0 models is allowed)
-- `baseUrl` / `apiKey` are written to `~/.pi/agent/cliproxyapi.json`
-- pi also stores the returned credential in `~/.pi/agent/auth.json`
+- Pi stores the API key and base URL in `~/.pi/agent/auth.json`
+- after Pi persists the native credential, duplicate `baseUrl` / `apiKey` fields are removed from `~/.pi/agent/cliproxyapi.json`
 
-Re-run `/login CLIProxyAPI` or `/login cliproxyapi` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `cliproxyapi.json`. Remove or update that file if you also need to clear the provider configuration.
+Re-run `/login CLIProxyAPI` or `/login cliproxyapi` anytime to reconfigure. `/logout` removes the native credential; non-secret settings in `cliproxyapi.json` remain.
 
 ## Non-interactive configuration
 
@@ -86,7 +93,9 @@ You can still configure without `/login`.
   "baseUrl": "http://127.0.0.1:8317",
   "apiKey": "12345",
   "fast": false,
-  "pause": false
+  "pause": false,
+  "transport": "websocket",
+  "useMaxContextWindow": false
 }
 ```
 
@@ -100,6 +109,8 @@ Optional fields:
 | `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
+| `transport` | `websocket` | Request transport: persistent `websocket`, persistent incremental-context `websocket-cached`, stock fallback `auto`, or `sse` |
+| `useMaxContextWindow` | `false` | Use catalog `max_context_window` instead of standard `context_window` when available |
 
 ### Environment overrides
 
@@ -110,15 +121,17 @@ Optional fields:
 | `CLIPROXYAPI_PROVIDER_ID` | `providerId` |
 | `CLIPROXYAPI_PROVIDER_NAME` | `providerName` |
 | `CLIPROXYAPI_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
+| `CLIPROXYAPI_TRANSPORT` | `transport` (`websocket`, `websocket-cached`, `auto`, or `sse`) |
+| `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` | `useMaxContextWindow` (same boolean forms as `CLIPROXYAPI_FAST`) |
 
 Resolution order for connection settings:
 
 1. Environment variables
-2. `cliproxyapi.json`
-3. `/login` credentials in `auth.json`
+2. `/login` credentials in `auth.json`
+3. `cliproxyapi.json`
 4. Default baseUrl `http://127.0.0.1:8317`
 
-The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`.
+The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`. Transport resolves as `CLIPROXYAPI_TRANSPORT` → `cliproxyapi.json` → `websocket`. Maximum context is opt-in via `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` → `cliproxyapi.json` → `false`.
 
 ### baseUrl normalization
 
@@ -131,7 +144,7 @@ Preferred form is **host:port only**:
 | `http://127.0.0.1:8317/v1` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 | `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 
-pi then sends inference traffic to `{inference}/codex/responses`.
+pi then sends inference traffic to `{inference}/codex/responses`. This fixed CLIProxyAPI client protocol is used for every discovered model. Pi can dispatch different models through different API implementations, but this extension intentionally leaves backend protocol translation to CLIProxyAPI instead of guessing from model IDs or origin metadata.
 
 ## Fast mode
 
@@ -186,7 +199,7 @@ When the provider loads (including session resume):
 1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=pi` then runs in the background; on success, the cache is rewritten and the registered model list is refreshed. If the query fails, the existing cache remains active.
 2. If no matching cache exists, the remote query runs synchronously. On success, the cache is written and the fetched models are registered. If it fails, startup logs a warning and no models are registered until the proxy responds.
 
-Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog.
+Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog. The provider also exposes Pi's native `refreshModels` lifecycle, so runtime-wide model refreshes use the same remote catalog and cache path.
 
 ### Refresh commands
 
@@ -204,11 +217,14 @@ From CPA catalog entry → pi model:
 | `slug` | `id` |
 | `display_name` | `name` |
 | `context_window` | `contextWindow` |
+| `max_tokens` / `max_completion_tokens` | `maxTokens` (preferred) |
+| matching models.dev `limit.output` | `maxTokens` fallback |
 | `input_modalities` | `input` (`text` / `image`) |
 | `supported_reasoning_levels[].effort` | `thinkingLevelMap` + `reasoning` |
+| `apply_patch_tool_type: "freeform"` | enables Pi OpenAI grammar/freeform tools |
 | `visibility: "hide"` | skipped |
 
-Unsupported pi thinking levels are set to `null` so they are hidden in the UI. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
+Unsupported pi thinking levels are set to `null` so they are hidden in the UI. Output limits resolve in this order: CPA `max_tokens`, CPA `max_completion_tokens`, matching models.dev `limit.output`, then `16384`. CPA exposes this as model-catalog metadata on supported versions; it is a client budgeting value, not a guarantee that every backend enforces the same limit. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller data is not selected arbitrarily, and prices fall back to zero.
 
 The raw `models.dev` response is cached for 24 hours at `~/.pi/agent/tmp/models-dev-cache.json`. A fresh cache avoids the network request; an expired cache is refreshed with a three-second timeout, and stale data is retained if refresh fails. If neither the network nor a previous cache is available, pricing safely falls back to zero. A small explicit alias table covers known CLIProxyAPI variants such as `gemini-pro-agent` → `gemini-3.1-pro-preview`; unknown variants are not guessed.
 
@@ -234,8 +250,8 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 
 - CLIProxyAPI `closed network connection` responses are normalized as transient network errors so pi's agent-level retry policy reconnects and restarts the interrupted assistant turn. Completed conversation and tool results remain available; token streaming does not resume from the exact interruption point.
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
-- After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `cliproxyapi.json`.
-- The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged.
+- After successful `/login`: models are registered and native API-key credentials are stored only in `auth.json`.
+- The built-in `/logout` command removes the matching `auth.json` credential; environment variables and non-secret `cliproxyapi.json` settings are unchanged.
 - If a models request returns **HTTP 401** or CPA is unreachable during startup, an existing matching cache remains in use while the background refresh fails. Only when no cache is available is a warning logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted

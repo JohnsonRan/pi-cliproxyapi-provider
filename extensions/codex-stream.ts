@@ -17,27 +17,41 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	Provider,
+	ProviderStreamOptions,
+	SimpleStreamOptions,
+	StreamOptions,
+} from "@earendil-works/pi-ai";
+import type { CliproxyTransport } from "./lib.ts";
 
 export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
 
-export type CliproxyCodexStreamSimple = (
+type CliproxyCodexStreamFunction<TOptions extends StreamOptions> = (
 	model: Model<Api>,
 	context: Context,
-	options?: SimpleStreamOptions,
+	options?: TOptions,
 ) => AssistantMessageEventStream;
+
+export type CliproxyCodexStream = Provider<typeof CLIPROXYAPI_CODEX_API>["stream"];
+export type CliproxyCodexStreamSimple = CliproxyCodexStreamFunction<SimpleStreamOptions>;
 
 export type CloseCodexWebSocketSessions = (sessionId?: string) => void;
 
 export type CliproxyCodexStreams = {
 	streamSimple: CliproxyCodexStreamSimple;
-	stream: CliproxyCodexStreamSimple;
+	stream: CliproxyCodexStream;
 	api: typeof CLIPROXYAPI_CODEX_API;
 	closeOpenAICodexWebSocketSessions: CloseCodexWebSocketSessions;
 };
 
 export interface CliproxyCodexStreamOptions {
 	shouldUseFast?: (model: Model<Api>) => boolean;
+	transport?: CliproxyTransport;
 }
 
 type PayloadHook = NonNullable<SimpleStreamOptions["onPayload"]>;
@@ -63,19 +77,64 @@ export async function applyFastPayloadHook(
 	return nextPayload === undefined ? fastPayload : nextPayload;
 }
 
+function wrapStreamForTransport<TOptions extends StreamOptions>(
+	stream: CliproxyCodexStreamFunction<TOptions>,
+	transport: CliproxyTransport,
+): CliproxyCodexStreamFunction<TOptions> {
+	return (model, context, streamOptions) =>
+		stream(model, context, {
+			...streamOptions,
+			transport: streamOptions?.cacheRetention === "none" ? "sse" : transport,
+		} as TOptions);
+}
+
+export function wrapStreamSimpleForTransport(
+	streamSimple: CliproxyCodexStreamSimple,
+	transport: CliproxyTransport,
+): CliproxyCodexStreamSimple {
+	return wrapStreamForTransport(streamSimple, transport);
+}
+
+export function wrapCodexStreamForTransport(
+	stream: CliproxyCodexStream,
+	transport: CliproxyTransport,
+): CliproxyCodexStream {
+	return wrapStreamForTransport(
+		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
+		transport,
+	) as CliproxyCodexStream;
+}
+
+function wrapStreamForFast<TOptions extends StreamOptions>(
+	stream: CliproxyCodexStreamFunction<TOptions>,
+	shouldUseFast?: (model: Model<Api>) => boolean,
+): CliproxyCodexStreamFunction<TOptions> {
+	return (model, context, streamOptions) => {
+		if (!shouldUseFast?.(model)) {
+			return stream(model, context, streamOptions);
+		}
+		return stream(model, context, {
+			...streamOptions,
+			onPayload: (payload, payloadModel) => applyFastPayloadHook(payload, payloadModel, streamOptions?.onPayload),
+		} as TOptions);
+	};
+}
+
 export function wrapStreamSimpleForFast(
 	streamSimple: CliproxyCodexStreamSimple,
 	shouldUseFast?: (model: Model<Api>) => boolean,
 ): CliproxyCodexStreamSimple {
-	return (model, context, streamOptions) => {
-		if (!shouldUseFast?.(model)) {
-			return streamSimple(model, context, streamOptions);
-		}
-		return streamSimple(model, context, {
-			...streamOptions,
-			onPayload: (payload, payloadModel) => applyFastPayloadHook(payload, payloadModel, streamOptions?.onPayload),
-		});
-	};
+	return wrapStreamForFast(streamSimple, shouldUseFast);
+}
+
+export function wrapCodexStreamForFast(
+	stream: CliproxyCodexStream,
+	shouldUseFast?: (model: Model<Api>) => boolean,
+): CliproxyCodexStream {
+	return wrapStreamForFast(
+		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
+		shouldUseFast,
+	) as CliproxyCodexStream;
 }
 
 const EXTRACT_ACCOUNT_ID_PATCH = `function extractAccountId(token) {
@@ -162,7 +221,11 @@ function patchWebSocketOnlyTransport(source: string): string {
 		.replace(fallbackActiveRecord, "stats.websocketFallbackActive = false;");
 }
 
-export function patchCodexSource(source: string, providerIds: string[]): string {
+export function patchCodexSource(
+	source: string,
+	providerIds: string[],
+	transport: CliproxyTransport = "websocket",
+): string {
 	let src = source;
 
 	if (!/function extractAccountId\(token\) \{/.test(src)) {
@@ -195,9 +258,9 @@ export function patchCodexSource(source: string, providerIds: string[]): string 
 	// Keep assistant message api metadata aligned with the registered custom api id.
 	src = src.replaceAll(`api: "openai-codex-responses"`, `api: ${JSON.stringify(CLIPROXYAPI_CODEX_API)}`);
 
-	// CLIProxyAPI needs a persistent WebSocket transport. Reconnect before the
-	// response starts and surface a failure rather than silently switching to SSE.
-	src = patchWebSocketOnlyTransport(src);
+	// Explicit WebSocket modes reconnect before the response starts and surface
+	// failures. Auto and SSE retain pi's stock transport behavior.
+	if (transport === "websocket" || transport === "websocket-cached") src = patchWebSocketOnlyTransport(src);
 
 	// The generated module lives outside the original source map directory.
 	src = src.replace(/^\/\/# sourceMappingURL=.*$/gm, "");
@@ -242,7 +305,8 @@ export async function loadCliproxyCodexStreams(
 ): Promise<CliproxyCodexStreams> {
 	const { path: originalPath, dir: originalDir } = resolveOriginalCodexModulePath();
 	const originalSource = readFileSync(originalPath, "utf8");
-	const patched = rewriteRelativeImports(patchCodexSource(originalSource, providerIds), originalDir);
+	const transport = options.transport ?? "websocket";
+	const patched = rewriteRelativeImports(patchCodexSource(originalSource, providerIds, transport), originalDir);
 
 	const hash = createHash("sha1").update(patched).digest("hex").slice(0, 16);
 	const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");
@@ -254,7 +318,7 @@ export async function loadCliproxyCodexStreams(
 
 	const mod = (await import(pathToFileURL(outPath).href)) as {
 		streamSimple: CliproxyCodexStreamSimple;
-		stream: CliproxyCodexStreamSimple;
+		stream: CliproxyCodexStream;
 		closeOpenAICodexWebSocketSessions?: CloseCodexWebSocketSessions;
 	};
 
@@ -267,12 +331,13 @@ export async function loadCliproxyCodexStreams(
 	const closeOpenAICodexWebSocketSessions =
 		typeof mod.closeOpenAICodexWebSocketSessions === "function" ? mod.closeOpenAICodexWebSocketSessions : () => {};
 
-	const streamSimple = wrapStreamSimpleForFast(mod.streamSimple, options.shouldUseFast);
+	const streamSimple = wrapStreamForFast(wrapStreamForTransport(mod.streamSimple, transport), options.shouldUseFast);
+	const stream = wrapCodexStreamForFast(wrapCodexStreamForTransport(mod.stream, transport), options.shouldUseFast);
 
 	return {
 		api: CLIPROXYAPI_CODEX_API,
 		streamSimple,
-		stream: mod.stream,
+		stream,
 		closeOpenAICodexWebSocketSessions,
 	};
 }

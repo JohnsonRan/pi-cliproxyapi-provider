@@ -23,10 +23,14 @@ import {
 	loadConfigFile,
 	ModelsHttpError,
 	matchModelCost,
+	matchModelMaxTokens,
 	parseBooleanSetting,
+	resolveConnectionSources,
 	resolveEndpoints,
 	resolveFastDefault,
 	resolveIdentity,
+	resolveTransportDefault,
+	resolveUseMaxContextWindow,
 	saveConfigFile,
 	supportsFastServiceTier,
 	toPiModel,
@@ -60,13 +64,39 @@ describe("firstNonEmpty", () => {
 	});
 });
 
+describe("resolveConnectionSources", () => {
+	it("uses environment, then native credentials, then config", () => {
+		expect(
+			resolveConnectionSources({
+				envBaseUrl: "http://env.example",
+				envApiKey: "env-key",
+				credentialBaseUrl: "http://stored.example",
+				credentialApiKey: "stored-key",
+				fileBaseUrl: "http://file.example",
+				fileApiKey: "file-key",
+			}),
+		).toEqual({ baseUrlInput: "http://env.example", apiKey: "env-key" });
+		expect(
+			resolveConnectionSources({
+				credentialBaseUrl: "http://stored.example",
+				credentialApiKey: "stored-key",
+				fileBaseUrl: "http://file.example",
+				fileApiKey: "file-key",
+			}),
+		).toEqual({ baseUrlInput: "http://stored.example", apiKey: "stored-key" });
+		expect(resolveConnectionSources({ fileApiKey: "file-key" })).toEqual({
+			baseUrlInput: DEFAULT_BASE_URL,
+			apiKey: "file-key",
+		});
+	});
+});
+
 describe("resolveEndpoints", () => {
 	it("normalizes host:port input", () => {
 		const result = resolveEndpoints("http://127.0.0.1:8317");
 		expect(result).toEqual({
 			inferenceBaseUrl: "http://127.0.0.1:8317/backend-api/",
 			modelsUrl: "http://127.0.0.1:8317/v1/models?client_version=pi",
-			rootOrigin: "http://127.0.0.1:8317",
 		});
 	});
 
@@ -173,6 +203,32 @@ describe("model mapping helpers", () => {
 		});
 	});
 
+	it("enables OpenAI grammar tools for freeform apply-patch models", () => {
+		expect(toPiModel({ slug: "grammar", apply_patch_tool_type: "freeform" })?.compat).toEqual({
+			supportsOpenAIGrammarTools: true,
+		});
+		expect(toPiModel({ slug: "function", apply_patch_tool_type: "function" })?.compat).toBeUndefined();
+	});
+
+	it("does not infer deferred tool search from CPA model names", () => {
+		expect(toPiModel({ slug: "gpt-5.6-sol" })?.compat).toBeUndefined();
+	});
+
+	it("uses maximum context windows only when opted in", () => {
+		const catalogModel = { slug: "large", context_window: 272000, max_context_window: 400000 };
+		expect(toPiModel(catalogModel)?.contextWindow).toBe(272000);
+		expect(toPiModel(catalogModel, undefined, false, true)?.contextWindow).toBe(400000);
+	});
+
+	it("maps catalog output token limits", () => {
+		expect(toPiModel({ slug: "primary", max_tokens: 128000 })?.maxTokens).toBe(128000);
+		expect(toPiModel({ slug: "compat", max_completion_tokens: 64000 })?.maxTokens).toBe(64000);
+		expect(toPiModel({ slug: "preferred", max_tokens: 128000, max_completion_tokens: 64000 })?.maxTokens).toBe(
+			128000,
+		);
+		expect(toPiModel({ slug: "invalid", max_tokens: 0 })?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+	});
+
 	it("skips hide visibility and missing ids", () => {
 		expect(toPiModel({ slug: "x", visibility: "hide" })).toBeNull();
 		expect(toPiModel({ display_name: "no-id" })).toBeNull();
@@ -193,6 +249,7 @@ describe("models.dev cost mapping", () => {
 					openai: {
 						models: {
 							"gpt-5.6-sol": {
+								limit: { context: 1050000, input: 922000, output: 128000 },
 								cost: {
 									input: 5,
 									output: 30,
@@ -218,6 +275,7 @@ describe("models.dev cost mapping", () => {
 									},
 								},
 							},
+							"limit-only": { limit: { output: 32000 } },
 						},
 					},
 					xpersona: {
@@ -253,6 +311,10 @@ describe("models.dev cost mapping", () => {
 				cacheRead: 1,
 				cacheWrite: 12.5,
 			});
+			expect(matchModelMaxTokens("gpt-5.6-sol", catalog)).toBe(128000);
+			expect(toPiModel({ slug: "gpt-5.6-sol" }, catalog)?.maxTokens).toBe(128000);
+			expect(toPiModel({ slug: "gpt-5.6-sol", max_tokens: 64000 }, catalog)?.maxTokens).toBe(64000);
+			expect(matchModelMaxTokens("limit-only", catalog)).toBe(32000);
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -449,6 +511,7 @@ describe("config and auth file helpers", () => {
 				cliproxyapi: {
 					type: "api_key",
 					key: "plain-key",
+					env: { CLIPROXYAPI_BASE_URL: "http://127.0.0.1:9000" },
 				},
 			}),
 			"utf8",
@@ -456,6 +519,7 @@ describe("config and auth file helpers", () => {
 
 		expect(loadAuthConnection(agentDir, "cliproxyapi")).toEqual({
 			apiKey: "plain-key",
+			baseUrl: "http://127.0.0.1:9000",
 		});
 	});
 
@@ -485,6 +549,48 @@ describe("config and auth file helpers", () => {
 				delete process.env.CLIPROXYAPI_FAST;
 			} else {
 				process.env.CLIPROXYAPI_FAST = previous;
+			}
+		}
+	});
+
+	it("resolves maximum context opt-in from config with env precedence", () => {
+		const agentDir = tempAgentDir();
+		saveConfigFile(agentDir, { useMaxContextWindow: true });
+		const previous = process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW;
+		try {
+			delete process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW;
+			expect(resolveUseMaxContextWindow(agentDir)).toBe(true);
+			process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW = "off";
+			expect(resolveUseMaxContextWindow(agentDir)).toBe(false);
+			process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW = "invalid";
+			expect(() => resolveUseMaxContextWindow(agentDir)).toThrow(/CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW/);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW;
+			} else {
+				process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW = previous;
+			}
+		}
+	});
+
+	it("resolves transport from config with env precedence", () => {
+		const agentDir = tempAgentDir();
+		saveConfigFile(agentDir, { transport: "auto" });
+		const previous = process.env.CLIPROXYAPI_TRANSPORT;
+		try {
+			delete process.env.CLIPROXYAPI_TRANSPORT;
+			expect(resolveTransportDefault(agentDir)).toBe("auto");
+			process.env.CLIPROXYAPI_TRANSPORT = "websocket-cached";
+			expect(resolveTransportDefault(agentDir)).toBe("websocket-cached");
+			process.env.CLIPROXYAPI_TRANSPORT = "sse";
+			expect(resolveTransportDefault(agentDir)).toBe("sse");
+			process.env.CLIPROXYAPI_TRANSPORT = "invalid";
+			expect(() => resolveTransportDefault(agentDir)).toThrow(/websocket, websocket-cached, auto, sse/);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CLIPROXYAPI_TRANSPORT;
+			} else {
+				process.env.CLIPROXYAPI_TRANSPORT = previous;
 			}
 		}
 	});

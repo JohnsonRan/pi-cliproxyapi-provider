@@ -21,8 +21,6 @@ export const AUTH_FILE_NAME = "auth.json";
 export const CLIENT_VERSION = "pi";
 export const MODELS_REQUEST_TIMEOUT_MS = 60_000;
 
-/** Keep login credentials effectively permanent; reconfigure via /login. */
-export const CREDENTIAL_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
 export const MODELS_DEV_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
@@ -38,7 +36,11 @@ export interface CliproxyConfigFile {
 	providerName?: string;
 	fast?: boolean;
 	pause?: boolean;
+	transport?: CliproxyTransport;
+	useMaxContextWindow?: boolean;
 }
+
+export type CliproxyTransport = "websocket" | "websocket-cached" | "auto" | "sse";
 
 export interface ResolvedIdentity {
 	providerId: string;
@@ -48,8 +50,16 @@ export interface ResolvedIdentity {
 export interface ResolvedConnection {
 	baseUrlInput: string;
 	apiKey: string;
-	inferenceBaseUrl: string;
-	modelsUrl: string;
+}
+
+export interface ConnectionSources {
+	envBaseUrl?: string;
+	envApiKey?: string;
+	credentialBaseUrl?: string;
+	credentialApiKey?: string;
+	fileBaseUrl?: string;
+	fileApiKey?: string;
+	defaultBaseUrl?: string;
 }
 
 export interface CodexReasoningLevel {
@@ -71,11 +81,14 @@ export interface CodexClientModel {
 	description?: string;
 	context_window?: number;
 	max_context_window?: number;
+	max_tokens?: number;
+	max_completion_tokens?: number;
 	input_modalities?: string[];
 	supported_reasoning_levels?: CodexReasoningLevel[] | string[];
 	default_service_tier?: string | null;
 	service_tiers?: Array<CodexServiceTier | string>;
 	additional_speed_tiers?: string[];
+	apply_patch_tool_type?: string;
 	visibility?: string;
 }
 
@@ -110,14 +123,17 @@ export interface PiProviderModel {
 	contextWindow: number;
 	maxTokens: number;
 	thinkingLevelMap?: ThinkingLevelMap;
+	compat?: {
+		supportsOpenAIGrammarTools?: boolean;
+	};
 }
 
 export interface MappedModels {
 	models: PiProviderModel[];
 	fastModelIds: string[];
-	inferenceBaseUrl: string;
 	modelsUrl: string;
 	fastMode?: boolean;
+	useMaxContextWindow?: boolean;
 }
 
 export interface ModelsCacheFile extends MappedModels {
@@ -139,6 +155,9 @@ interface ModelsDevModePayload {
 
 interface ModelsDevModelPayload {
 	cost?: ModelsDevCostPayload;
+	limit?: {
+		output?: unknown;
+	};
 	experimental?: {
 		modes?: Record<string, ModelsDevModePayload | undefined>;
 	};
@@ -149,6 +168,7 @@ export interface ModelsDevCostEntry {
 	modelId: string;
 	standard: PiProviderCost;
 	fast?: PiProviderCost;
+	maxTokens?: number;
 }
 
 export interface ModelsDevCostCatalog {
@@ -180,7 +200,6 @@ export function firstNonEmpty(...values: Array<string | undefined | null>): stri
 export function resolveEndpoints(baseUrlInput: string): {
 	inferenceBaseUrl: string;
 	modelsUrl: string;
-	rootOrigin: string;
 } {
 	let raw = baseUrlInput.trim();
 	if (!raw) {
@@ -208,11 +227,7 @@ export function resolveEndpoints(baseUrlInput: string): {
 	const modelsPath = `${rootPath}/v1/models`.replace(/\/{2,}/g, "/");
 	const modelsUrl = `${url.origin}${modelsPath}?client_version=${encodeURIComponent(CLIENT_VERSION)}`;
 
-	return {
-		inferenceBaseUrl,
-		modelsUrl,
-		rootOrigin: url.origin,
-	};
+	return { inferenceBaseUrl, modelsUrl };
 }
 
 export function encodeRefreshMeta(baseUrl: string): string {
@@ -273,7 +288,6 @@ export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsC
 		if (
 			typeof parsed.fetchedAt !== "number" ||
 			parsed.modelsUrl !== endpoints.modelsUrl ||
-			parsed.inferenceBaseUrl !== endpoints.inferenceBaseUrl ||
 			!Array.isArray(parsed.models) ||
 			!Array.isArray(parsed.fastModelIds)
 		) {
@@ -302,7 +316,11 @@ export function loadAuthConnection(agentDir: string, providerId: string): { base
 	}
 
 	if (entry?.type === "api_key" && typeof entry.key === "string" && entry.key.trim()) {
-		return { apiKey: entry.key.trim() };
+		const baseUrl =
+			entry.env && typeof entry.env.CLIPROXYAPI_BASE_URL === "string"
+				? entry.env.CLIPROXYAPI_BASE_URL.trim() || undefined
+				: undefined;
+		return { apiKey: entry.key.trim(), baseUrl };
 	}
 	return null;
 }
@@ -359,6 +377,30 @@ export function resolveFastDefault(agentDir: string): boolean {
 	return file.fast;
 }
 
+/** Resolve opt-in maximum context windows from env/config, defaulting to false. */
+export function resolveUseMaxContextWindow(agentDir: string): boolean {
+	const envValue = firstNonEmpty(process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW);
+	if (envValue !== undefined) {
+		const parsed = parseBooleanSetting(envValue);
+		if (parsed === undefined) {
+			throw new Error(`CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW must be one of: true, false, 1, 0, yes, no, on, off`);
+		}
+		return parsed;
+	}
+
+	const value = loadConfigFile(agentDir).useMaxContextWindow;
+	if (value === undefined) return false;
+	if (typeof value !== "boolean") throw new Error(`${CONFIG_FILE_NAME} field "useMaxContextWindow" must be a boolean`);
+	return value;
+}
+
+/** Resolve Codex transport from env/config, defaulting to persistent WebSocket. */
+export function resolveTransportDefault(agentDir: string): CliproxyTransport {
+	const value = firstNonEmpty(process.env.CLIPROXYAPI_TRANSPORT) ?? loadConfigFile(agentDir).transport ?? "websocket";
+	if (value === "websocket" || value === "websocket-cached" || value === "auto" || value === "sse") return value;
+	throw new Error(`CLIProxyAPI transport must be one of: websocket, websocket-cached, auto, sse`);
+}
+
 /** Resolve the request pause preference from cliproxyapi.json, defaulting to false. */
 export function resolvePauseDefault(agentDir: string): boolean {
 	const file = loadConfigFile(agentDir);
@@ -371,9 +413,22 @@ export function resolvePauseDefault(agentDir: string): boolean {
 	return file.pause;
 }
 
+/** Resolve connection values consistently for catalog refreshes and inference. */
+export function resolveConnectionSources(sources: ConnectionSources): ResolvedConnection | null {
+	const baseUrlInput = firstNonEmpty(
+		sources.envBaseUrl,
+		sources.credentialBaseUrl,
+		sources.fileBaseUrl,
+		sources.defaultBaseUrl,
+		DEFAULT_BASE_URL,
+	)!;
+	const apiKey = firstNonEmpty(sources.envApiKey, sources.credentialApiKey, sources.fileApiKey);
+	return apiKey ? { baseUrlInput, apiKey } : null;
+}
+
 /**
  * Resolve connection settings.
- * Priority: env > cliproxyapi.json > auth.json (/login) > default baseUrl
+ * Priority: env > auth.json (/login) > cliproxyapi.json > default baseUrl.
  */
 export function resolveConnection(agentDir: string, providerId: string): ResolvedConnection | null {
 	let file: CliproxyConfigFile = {};
@@ -390,19 +445,14 @@ export function resolveConnection(agentDir: string, providerId: string): Resolve
 		auth = null;
 	}
 
-	const baseUrlInput = firstNonEmpty(process.env.CLIPROXYAPI_BASE_URL, file.baseUrl, auth?.baseUrl, DEFAULT_BASE_URL)!;
-	const apiKey = firstNonEmpty(process.env.CLIPROXYAPI_API_KEY, file.apiKey, auth?.apiKey);
-	if (!apiKey) {
-		return null;
-	}
-
-	const endpoints = resolveEndpoints(baseUrlInput);
-	return {
-		baseUrlInput,
-		apiKey,
-		inferenceBaseUrl: endpoints.inferenceBaseUrl,
-		modelsUrl: endpoints.modelsUrl,
-	};
+	return resolveConnectionSources({
+		envBaseUrl: process.env.CLIPROXYAPI_BASE_URL,
+		envApiKey: process.env.CLIPROXYAPI_API_KEY,
+		credentialBaseUrl: auth?.baseUrl,
+		credentialApiKey: auth?.apiKey,
+		fileBaseUrl: file.baseUrl,
+		fileApiKey: file.apiKey,
+	});
 }
 
 export function extractReasoningEfforts(model: CodexClientModel): string[] {
@@ -465,6 +515,7 @@ export function toPiModel(
 	model: CodexClientModel,
 	costCatalog?: ModelsDevCostCatalog,
 	fastMode = false,
+	useMaxContextWindow = false,
 ): PiProviderModel | null {
 	const id = codexModelId(model);
 	if (!id) {
@@ -476,16 +527,29 @@ export function toPiModel(
 
 	const efforts = extractReasoningEfforts(model);
 	const hasReasoning = efforts.some((effort) => effort !== "none");
-	const contextWindow =
-		(typeof model.context_window === "number" && model.context_window > 0 ? model.context_window : undefined) ??
-		(typeof model.max_context_window === "number" && model.max_context_window > 0
-			? model.max_context_window
-			: undefined) ??
-		DEFAULT_CONTEXT_WINDOW;
+	const contextWindow = useMaxContextWindow
+		? ((typeof model.max_context_window === "number" && model.max_context_window > 0
+				? model.max_context_window
+				: undefined) ??
+			(typeof model.context_window === "number" && model.context_window > 0 ? model.context_window : undefined) ??
+			DEFAULT_CONTEXT_WINDOW)
+		: ((typeof model.context_window === "number" && model.context_window > 0 ? model.context_window : undefined) ??
+			(typeof model.max_context_window === "number" && model.max_context_window > 0
+				? model.max_context_window
+				: undefined) ??
+			DEFAULT_CONTEXT_WINDOW);
 
+	const maxTokens =
+		(typeof model.max_tokens === "number" && model.max_tokens > 0 ? model.max_tokens : undefined) ??
+		(typeof model.max_completion_tokens === "number" && model.max_completion_tokens > 0
+			? model.max_completion_tokens
+			: undefined) ??
+		(costCatalog ? matchModelMaxTokens(id, costCatalog) : undefined) ??
+		DEFAULT_MAX_TOKENS;
 	const cost = costCatalog
 		? matchModelCost(id, costCatalog, fastMode && supportsFastServiceTier(model))
 		: { ...ZERO_COST };
+	const compat = model.apply_patch_tool_type === "freeform" ? { supportsOpenAIGrammarTools: true } : undefined;
 
 	return {
 		id,
@@ -494,8 +558,9 @@ export function toPiModel(
 		input: buildInputModalities(model),
 		cost,
 		contextWindow,
-		maxTokens: DEFAULT_MAX_TOKENS,
+		maxTokens,
 		thinkingLevelMap: buildThinkingLevelMap(efforts),
+		...(compat ? { compat } : {}),
 	};
 }
 
@@ -704,7 +769,11 @@ function addModelsDevEntry(catalog: ModelsDevCostCatalog, entry: ModelsDevCostEn
 }
 
 function sameCostVariants(entries: ModelsDevCostEntry[]): boolean {
-	const fingerprints = new Set(entries.map((entry) => JSON.stringify({ standard: entry.standard, fast: entry.fast })));
+	const fingerprints = new Set(
+		entries.map((entry) =>
+			JSON.stringify({ standard: entry.standard, fast: entry.fast, maxTokens: entry.maxTokens }),
+		),
+	);
 	return fingerprints.size === 1;
 }
 
@@ -796,9 +865,11 @@ function buildCatalogFromProviders(providers: Record<string, unknown>): ModelsDe
 		for (const [modelId, modelValue] of Object.entries(models)) {
 			const model = asRecord(modelValue) as ModelsDevModelPayload | undefined;
 			const standard = parseModelsDevCost(model?.cost);
-			if (!standard) continue;
+			const outputLimit = finiteNumber(model?.limit?.output);
+			const maxTokens = outputLimit !== undefined && outputLimit > 0 ? Math.floor(outputLimit) : undefined;
+			if (!standard && maxTokens === undefined) continue;
 			const fast = parseModelsDevCost(model?.experimental?.modes?.fast?.cost);
-			addModelsDevEntry(catalog, { providerId, modelId, standard, fast });
+			addModelsDevEntry(catalog, { providerId, modelId, standard: standard ?? { ...ZERO_COST }, fast, maxTokens });
 		}
 	}
 	return catalog;
@@ -847,12 +918,17 @@ export function matchModelCost(modelId: string, costCatalog: ModelsDevCostCatalo
 	return cloneCost(isFastMode && entry.fast ? entry.fast : entry.standard);
 }
 
+export function matchModelMaxTokens(modelId: string, costCatalog: ModelsDevCostCatalog): number | undefined {
+	return findModelsDevEntry(modelId, costCatalog)?.maxTokens;
+}
+
 export async function loadMappedModels(
 	baseUrlInput: string,
 	apiKey: string,
 	timeoutOrFastMode: number | boolean = MODELS_REQUEST_TIMEOUT_MS,
 	agentDir?: string,
 	signal?: AbortSignal,
+	useMaxContextWindow = false,
 ): Promise<MappedModels> {
 	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
 	const effectiveFastMode = typeof timeoutOrFastMode === "boolean" ? timeoutOrFastMode : false;
@@ -863,7 +939,7 @@ export async function loadMappedModels(
 		pricingEnabled ? fetchModelsDevCostMap(agentDir, false, signal) : Promise.resolve(undefined),
 	]);
 	const models = remoteModels
-		.map((model) => toPiModel(model, costCatalog, effectiveFastMode))
+		.map((model) => toPiModel(model, costCatalog, effectiveFastMode, useMaxContextWindow))
 		.filter((model): model is PiProviderModel => model !== null);
 	const fastModelIds = Array.from(
 		new Set(
@@ -878,9 +954,9 @@ export async function loadMappedModels(
 	return {
 		models,
 		fastModelIds,
-		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
 		...(pricingEnabled ? { fastMode: effectiveFastMode } : {}),
+		useMaxContextWindow,
 	};
 }
 
@@ -897,19 +973,28 @@ export async function resolveMappedModels(
 		fastMode?: boolean;
 		signal?: AbortSignal;
 		shouldCommit?: () => boolean;
+		useMaxContextWindow?: boolean;
 	} = {},
 ): Promise<ResolvedModelsResult> {
-	const cacheMatchesFastMode = (cache: ModelsCacheFile): boolean =>
-		options.fastMode === undefined || (cache.fastMode ?? false) === options.fastMode;
+	const cacheMatchesOptions = (cache: ModelsCacheFile): boolean =>
+		(options.fastMode === undefined || (cache.fastMode ?? false) === options.fastMode) &&
+		(cache.useMaxContextWindow ?? false) === (options.useMaxContextWindow ?? false);
 
 	if (!options.forceRefresh) {
 		const cache = loadModelsCache(agentDir, baseUrlInput);
-		if (cache && cacheMatchesFastMode(cache)) {
+		if (cache && cacheMatchesOptions(cache)) {
 			return { loaded: cache, fromCache: true };
 		}
 	}
 
-	const loaded = await loadMappedModels(baseUrlInput, apiKey, options.fastMode, agentDir, options.signal);
+	const loaded = await loadMappedModels(
+		baseUrlInput,
+		apiKey,
+		options.fastMode,
+		agentDir,
+		options.signal,
+		options.useMaxContextWindow,
+	);
 	if (!options.signal?.aborted && (options.shouldCommit?.() ?? true)) {
 		saveModelsCache(agentDir, loaded);
 	}

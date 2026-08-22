@@ -6,11 +6,15 @@ import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@eare
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyFastPayloadHook,
+	CLIPROXYAPI_CODEX_API,
 	type CliproxyCodexStreamSimple,
 	loadCliproxyCodexStreams,
 	patchCodexSource,
 	withPriorityServiceTier,
+	wrapCodexStreamForFast,
+	wrapCodexStreamForTransport,
 	wrapStreamSimpleForFast,
+	wrapStreamSimpleForTransport,
 } from "../extensions/codex-stream.ts";
 import { FastModeController } from "../extensions/fast.ts";
 import { FastFooterController, formatFastModelStatus } from "../extensions/fast-footer.ts";
@@ -43,6 +47,30 @@ describe("Codex WebSocket transport patch", () => {
 		expect(patched).not.toContain("websocketSseFallbackSessions.add(sessionId);");
 		expect(patched).not.toMatch(/recordWebSocketSseFallback\([^)]*\);\s*break;/);
 		expect(patched).toContain("export function closeOpenAICodexWebSocketSessions(sessionId)");
+	});
+
+	it("keeps cached WebSocket context while disabling SSE fallback", () => {
+		const source = readFileSync(
+			new URL("../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js", import.meta.url),
+			"utf8",
+		);
+		const patched = patchCodexSource(source, ["cliproxyapi"], "websocket-cached");
+
+		expect(patched).toContain('options?.transport === "websocket-cached"');
+		expect(patched).toContain("const websocketDisabledForSession = false;");
+		expect(patched).not.toContain('fallbackTransport: websocketStarted ? undefined : "sse",');
+		expect(patched).not.toContain("websocketSseFallbackSessions.add(sessionId);");
+	});
+
+	it("keeps stock fallback behavior for auto transport", () => {
+		const source = readFileSync(
+			new URL("../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js", import.meta.url),
+			"utf8",
+		);
+		const patched = patchCodexSource(source, ["cliproxyapi"], "auto");
+
+		expect(patched).toContain('fallbackTransport: websocketStarted ? undefined : "sse",');
+		expect(patched).toContain("websocketSseFallbackSessions.add(sessionId);");
 	});
 
 	it("exports closeOpenAICodexWebSocketSessions from the patched module instance", async () => {
@@ -323,6 +351,65 @@ describe("Fast pricing mapping", () => {
 			fetchMock.mockRestore();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Codex transport wrapper", () => {
+	it("forces the configured transport while preserving other options", () => {
+		let captured: SimpleStreamOptions | undefined;
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
+			captured = options;
+			return streamResult;
+		};
+		const wrapped = wrapStreamSimpleForTransport(baseStream, "sse");
+
+		expect(wrapped(model, { messages: [] }, { timeoutMs: 1234, transport: "websocket" })).toBe(streamResult);
+		expect(captured).toEqual({ timeoutMs: 1234, transport: "sse" });
+	});
+
+	it("preserves API-specific options on the full stream contract", () => {
+		let captured: unknown;
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const wrapped = wrapCodexStreamForFast(
+			wrapCodexStreamForTransport((_model, _context, options) => {
+				captured = options;
+				return streamResult;
+			}, "websocket"),
+			() => true,
+		);
+
+		const fullStreamModel = { ...model, api: CLIPROXYAPI_CODEX_API } as Model<typeof CLIPROXYAPI_CODEX_API>;
+		expect(
+			wrapped(
+				fullStreamModel,
+				{ messages: [] },
+				{
+					reasoningEffort: "high",
+					serviceTier: "default",
+					textVerbosity: "high",
+				},
+			),
+		).toBe(streamResult);
+		expect(captured).toMatchObject({
+			reasoningEffort: "high",
+			serviceTier: "default",
+			textVerbosity: "high",
+			transport: "websocket",
+			onPayload: expect.any(Function),
+		});
+	});
+
+	it("uses SSE for standalone no-cache requests", () => {
+		let captured: SimpleStreamOptions | undefined;
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const wrapped = wrapStreamSimpleForTransport((_model, _context, options) => {
+			captured = options;
+			return streamResult;
+		}, "websocket");
+
+		expect(wrapped(model, { messages: [] }, { cacheRetention: "none", sessionId: "summary" })).toBe(streamResult);
+		expect(captured).toMatchObject({ cacheRetention: "none", sessionId: "summary", transport: "sse" });
 	});
 });
 

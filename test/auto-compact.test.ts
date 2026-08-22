@@ -139,7 +139,7 @@ describe("proactive compaction controller", () => {
 		expect(closeWebSocketSessions).toHaveBeenCalledTimes(1);
 	});
 
-	it("closes the reused Codex WebSocket after compaction", async () => {
+	it("closes the current session socket after compaction", async () => {
 		const { ctx, handlers, model, wrapped, baseResult, closeWebSocketSessions, sessionId } = setup();
 		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
 		handlers.get("session_compact")?.({ reason: "overflow", willRetry: true }, ctx);
@@ -151,12 +151,18 @@ describe("proactive compaction controller", () => {
 		expect(closeWebSocketSessions).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not close a WebSocket when the session id is missing", () => {
+	it("closes all sockets when the extension runtime shuts down", () => {
+		const { ctx, handlers, closeWebSocketSessions } = setup();
+		handlers.get("session_shutdown")?.({ reason: "reload" }, ctx);
+		expect(closeWebSocketSessions).toHaveBeenCalledWith(undefined);
+	});
+
+	it("closes all WebSockets when the compacted session id is missing", () => {
 		const { handlers, closeWebSocketSessions } = setup();
 		handlers.get("session_compact")?.({ reason: "manual" }, {
 			sessionManager: { getSessionId: () => "" },
 		} as unknown as ExtensionContext);
-		expect(closeWebSocketSessions).not.toHaveBeenCalled();
+		expect(closeWebSocketSessions).toHaveBeenCalledWith(undefined);
 	});
 
 	it("keeps compaction working if WebSocket close throws", () => {

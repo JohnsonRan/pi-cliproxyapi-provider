@@ -25,6 +25,8 @@ const CLIPROXYAPI_ENV_NAMES = [
 	"CLIPROXYAPI_FAST",
 	"CLIPROXYAPI_PROVIDER_ID",
 	"CLIPROXYAPI_PROVIDER_NAME",
+	"CLIPROXYAPI_TRANSPORT",
+	"CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW",
 ] as const;
 
 function createModel(id: string): PiProviderModel {
@@ -55,7 +57,6 @@ function createMappedModels(
 	return {
 		models: options.models ?? [],
 		fastModelIds: options.fastModelIds ?? [],
-		inferenceBaseUrl: endpoints.inferenceBaseUrl,
 		modelsUrl: endpoints.modelsUrl,
 		...(options.fastMode === undefined ? {} : { fastMode: options.fastMode }),
 	};
@@ -102,6 +103,16 @@ async function withTempAgentDir(run: (agentDir: string) => Promise<void>): Promi
 			}
 		}
 	}
+}
+
+function registeredModelLists(pi: ExtensionAPI): Model<Api>[][] {
+	return (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls
+		.map(([provider]) =>
+			provider && typeof provider === "object" && typeof provider.getModels === "function"
+				? provider.getModels()
+				: [],
+		)
+		.filter((models) => models.length > 0);
 }
 
 function createPiMock(commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>()): {
@@ -388,26 +399,14 @@ describe("provider startup cache behavior", () => {
 				expect(fetchMock).toHaveBeenCalledTimes(2);
 				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 
-				const initialCallsWithModels = (
-					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
-						[string, { models?: PiProviderModel[] }]
-					>
-				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(initialCallsWithModels[0]?.[1].models?.map((model: PiProviderModel) => model.id)).toEqual([
-					"startup-cached",
-				]);
+				expect(registeredModelLists(pi)[0]?.map((model) => model.id)).toEqual(["startup-cached"]);
 
 				releaseRemote(
 					new Response(JSON.stringify({ models: [createCodexModel("background-fresh", true)] }), { status: 200 }),
 				);
 				await waitForAsyncRefresh();
 
-				const refreshedCallsWithModels = (
-					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
-						[string, { models?: PiProviderModel[] }]
-					>
-				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(refreshedCallsWithModels.at(-1)?.[1].models?.[0].id).toBe("background-fresh");
+				expect(registeredModelLists(pi).at(-1)?.[0].id).toBe("background-fresh");
 				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 				expect(diskCache?.models[0].id).toBe("background-fresh");
 				expect(diskCache?.fastModelIds).toEqual(["background-fresh"]);
@@ -452,12 +451,7 @@ describe("provider startup cache behavior", () => {
 
 				const diskCacheAfterOlderRefresh = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 				expect(diskCacheAfterOlderRefresh?.models[0]?.id).toBe("newer");
-				const callsWithModels = (
-					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
-						[string, { models?: PiProviderModel[] }]
-					>
-				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(callsWithModels.at(-1)?.[1].models?.[0]?.id).toBe("newer");
+				expect(registeredModelLists(pi).at(-1)?.[0]?.id).toBe("newer");
 			} finally {
 				fetchMock.mockRestore();
 			}
@@ -478,12 +472,7 @@ describe("provider startup cache behavior", () => {
 				await waitForAsyncRefresh();
 				expect(fetchMock).toHaveBeenCalledTimes(2);
 
-				const callsWithModels = (
-					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
-						[string, { models?: PiProviderModel[] }]
-					>
-				).filter(([, config]) => config.models && config.models.length > 0);
-				expect(callsWithModels[0]?.[1].models?.[0].id).toBe("startup-fallback");
+				expect(registeredModelLists(pi)[0]?.[0].id).toBe("startup-fallback");
 				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 				expect(diskCache?.models[0].id).toBe("startup-fallback");
 			} finally {

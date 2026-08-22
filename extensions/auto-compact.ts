@@ -51,7 +51,7 @@ export function shouldScheduleProactiveCompaction(
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
 
-export function createProactiveCompactionStream(model: Model<Api>, contextTokens: number, threshold: number) {
+function createProactiveCompactionStream(model: Model<Api>, contextTokens: number, threshold: number) {
 	const stream = createAssistantMessageEventStream();
 	const output: AssistantMessage = {
 		role: "assistant",
@@ -109,6 +109,9 @@ export class ProactiveCompactionController {
 		pi.on("session_shutdown", () => {
 			this.settingsManager = undefined;
 			this.pending = undefined;
+			// Generated Codex modules keep their own socket caches. Close every socket
+			// owned by this extension instance before reload/session replacement.
+			this.resetWebSocketSession();
 		});
 
 		pi.on("session_compact", (_event, ctx) => {
@@ -172,14 +175,15 @@ export class ProactiveCompactionController {
 	}
 
 	private resetWebSocketSession(sessionId?: string): void {
-		if (!sessionId || !this.closeWebSocketSessions) {
+		if (!this.closeWebSocketSessions) {
 			return;
 		}
 		try {
 			this.closeWebSocketSessions(sessionId);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			console.warn(`[pi-cliproxyapi-provider] failed to close Codex WebSocket for session ${sessionId}: ${message}`);
+			const scope = sessionId ? `session ${sessionId}` : "all sessions";
+			console.warn(`[pi-cliproxyapi-provider] failed to close Codex WebSocket for ${scope}: ${message}`);
 		}
 	}
 

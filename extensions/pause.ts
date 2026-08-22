@@ -43,7 +43,7 @@ export class PauseController {
 
 export const pauseController = new PauseController();
 
-export function readPauseSetting(agentDir: string, fallback = false): boolean {
+function readPauseSetting(agentDir: string, fallback = false): boolean {
 	try {
 		return resolvePauseDefault(agentDir);
 	} catch {

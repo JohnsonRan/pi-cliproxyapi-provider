@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
@@ -6,11 +6,13 @@ import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@eare
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyFastPayloadHook,
+	CLIPROXYAPI_CODEX_API,
 	type CliproxyCodexStreamSimple,
-	loadCliproxyCodexStreams,
-	patchCodexSource,
 	withPriorityServiceTier,
+	wrapCodexStreamForFast,
+	wrapCodexStreamForTransport,
 	wrapStreamSimpleForFast,
+	wrapStreamSimpleForTransport,
 } from "../extensions/codex-stream.ts";
 import { FastModeController } from "../extensions/fast.ts";
 import { FastFooterController, formatFastModelStatus } from "../extensions/fast-footer.ts";
@@ -21,36 +23,6 @@ const model = {
 	id: "gpt-5.4",
 	provider: "cliproxyapi",
 } as Model<Api>;
-
-describe("Codex WebSocket transport patch", () => {
-	it("reconnects WebSocket instead of falling back to SSE", () => {
-		const source = readFileSync(
-			new URL("../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js", import.meta.url),
-			"utf8",
-		);
-		const patched = patchCodexSource(source, ["cliproxyapi"]);
-
-		expect(patched).toContain("const websocketDisabledForSession = false;");
-		expect(patched).toContain("let websocketRetries = 0;");
-		expect(patched).toContain("const connectionLimitBeforeStart = !websocketStarted");
-		expect(patched).toContain("isCodexNonTransportError(error) && !connectionLimitBeforeStart");
-		expect(patched).toContain("const previousResponseNotFound = isPreviousResponseNotFoundError(error);");
-		expect(patched).toContain("recordWebSocketFailure(cacheSessionId, error);");
-		expect(patched).toContain("const maxWebSocketRetries = Number.isFinite(options?.maxRetries)");
-		expect(patched).toContain("? Math.min(Math.max(0, Math.floor(options.maxRetries)), 5)");
-		expect(patched).toContain(": 3;");
-		expect(patched).not.toContain('fallbackTransport: websocketStarted ? undefined : "sse",');
-		expect(patched).not.toContain("websocketSseFallbackSessions.add(sessionId);");
-		expect(patched).not.toMatch(/recordWebSocketSseFallback\([^)]*\);\s*break;/);
-		expect(patched).toContain("export function closeOpenAICodexWebSocketSessions(sessionId)");
-	});
-
-	it("exports closeOpenAICodexWebSocketSessions from the patched module instance", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
-		expect(typeof streams.closeOpenAICodexWebSocketSessions).toBe("function");
-		expect(() => streams.closeOpenAICodexWebSocketSessions("missing-session")).not.toThrow();
-	});
-});
 
 describe("FastModeController", () => {
 	it("combines the global preference with model capability", () => {
@@ -323,6 +295,65 @@ describe("Fast pricing mapping", () => {
 			fetchMock.mockRestore();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Codex transport wrapper", () => {
+	it("forces the configured transport while preserving other options", () => {
+		let captured: SimpleStreamOptions | undefined;
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
+			captured = options;
+			return streamResult;
+		};
+		const wrapped = wrapStreamSimpleForTransport(baseStream, "sse");
+
+		expect(wrapped(model, { messages: [] }, { timeoutMs: 1234, transport: "websocket" })).toBe(streamResult);
+		expect(captured).toEqual({ timeoutMs: 1234, transport: "sse" });
+	});
+
+	it("preserves API-specific options on the full stream contract", () => {
+		let captured: unknown;
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const wrapped = wrapCodexStreamForFast(
+			wrapCodexStreamForTransport((_model, _context, options) => {
+				captured = options;
+				return streamResult;
+			}, "websocket"),
+			() => true,
+		);
+
+		const fullStreamModel = { ...model, api: CLIPROXYAPI_CODEX_API } as Model<typeof CLIPROXYAPI_CODEX_API>;
+		expect(
+			wrapped(
+				fullStreamModel,
+				{ messages: [] },
+				{
+					reasoningEffort: "high",
+					serviceTier: "default",
+					textVerbosity: "high",
+				},
+			),
+		).toBe(streamResult);
+		expect(captured).toMatchObject({
+			reasoningEffort: "high",
+			serviceTier: "default",
+			textVerbosity: "high",
+			transport: "websocket",
+			onPayload: expect.any(Function),
+		});
+	});
+
+	it("uses SSE for standalone no-cache requests", () => {
+		let captured: SimpleStreamOptions | undefined;
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const wrapped = wrapStreamSimpleForTransport((_model, _context, options) => {
+			captured = options;
+			return streamResult;
+		}, "websocket");
+
+		expect(wrapped(model, { messages: [] }, { cacheRetention: "none", sessionId: "summary" })).toBe(streamResult);
+		expect(captured).toMatchObject({ cacheRetention: "none", sessionId: "summary", transport: "sse" });
 	});
 });
 

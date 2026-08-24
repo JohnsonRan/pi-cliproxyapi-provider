@@ -87,7 +87,7 @@ describe("proactive compaction controller", () => {
 		}
 	});
 
-	function setup(enabled = true) {
+	function setup(enabled = true, cleanupResources = vi.fn()) {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-auto-compact-agent-"));
 		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-auto-compact-cwd-"));
 		tempDirs.push(agentDir, cwd);
@@ -98,8 +98,7 @@ describe("proactive compaction controller", () => {
 		const pi = {
 			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
 		} as unknown as ExtensionAPI;
-		const closeWebSocketSessions = vi.fn();
-		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi", closeWebSocketSessions);
+		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi", cleanupResources);
 		controller.register(pi);
 
 		const model = {
@@ -122,11 +121,11 @@ describe("proactive compaction controller", () => {
 		const baseResult = {} as ReturnType<CliproxyCodexStreamSimple>;
 		const baseStream: CliproxyCodexStreamSimple = () => baseResult;
 		const wrapped = controller.wrapStreamSimple(baseStream);
-		return { ctx, handlers, model, wrapped, baseResult, settingsPath, closeWebSocketSessions, sessionId, controller };
+		return { ctx, handlers, model, wrapped, baseResult, settingsPath, cleanupResources, sessionId, controller };
 	}
 
 	it("injects one overflow before the next provider request", async () => {
-		const { ctx, handlers, model, wrapped, baseResult, closeWebSocketSessions, sessionId } = setup();
+		const { ctx, handlers, model, wrapped, baseResult, cleanupResources, sessionId } = setup();
 		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
 
 		const proactiveStream = wrapped(model, { messages: [] }, { sessionId });
@@ -134,45 +133,44 @@ describe("proactive compaction controller", () => {
 		expect(error.stopReason).toBe("error");
 		expect(error.errorMessage).toBe(`${PROACTIVE_COMPACTION_ERROR_PREFIX} (${THRESHOLD + 1} > ${THRESHOLD})`);
 		expect(isContextOverflow(error, CONTEXT_WINDOW)).toBe(true);
-		expect(closeWebSocketSessions).toHaveBeenCalledWith(sessionId);
+		expect(cleanupResources).toHaveBeenCalledWith(sessionId);
 		expect(wrapped(model, { messages: [] }, { sessionId })).toBe(baseResult);
-		expect(closeWebSocketSessions).toHaveBeenCalledTimes(1);
+		expect(cleanupResources).toHaveBeenCalledTimes(1);
 	});
 
-	it("closes the current session socket after compaction", async () => {
-		const { ctx, handlers, model, wrapped, baseResult, closeWebSocketSessions, sessionId } = setup();
+	it("cleans the current session resources after compaction", async () => {
+		const { ctx, handlers, model, wrapped, baseResult, cleanupResources, sessionId } = setup();
 		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
 		handlers.get("session_compact")?.({ reason: "overflow", willRetry: true }, ctx);
-		expect(closeWebSocketSessions).toHaveBeenCalledTimes(1);
-		expect(closeWebSocketSessions).toHaveBeenCalledWith(sessionId);
+		expect(cleanupResources).toHaveBeenCalledTimes(1);
+		expect(cleanupResources).toHaveBeenCalledWith(sessionId);
 		// Compaction replaces the client context; do not inject another overflow
 		// against the still-large server cacheRead from the previous socket.
 		expect(wrapped(model, { messages: [] }, { sessionId })).toBe(baseResult);
-		expect(closeWebSocketSessions).toHaveBeenCalledTimes(1);
+		expect(cleanupResources).toHaveBeenCalledTimes(1);
 	});
 
-	it("closes all sockets when the extension runtime shuts down", () => {
-		const { ctx, handlers, closeWebSocketSessions } = setup();
+	it("cleans all resources when the extension runtime shuts down", () => {
+		const { ctx, handlers, cleanupResources } = setup();
 		handlers.get("session_shutdown")?.({ reason: "reload" }, ctx);
-		expect(closeWebSocketSessions).toHaveBeenCalledWith(undefined);
+		expect(cleanupResources).toHaveBeenCalledWith(undefined);
 	});
 
-	it("closes all WebSockets when the compacted session id is missing", () => {
-		const { handlers, closeWebSocketSessions } = setup();
+	it("cleans all resources when the compacted session id is missing", () => {
+		const { handlers, cleanupResources } = setup();
 		handlers.get("session_compact")?.({ reason: "manual" }, {
 			sessionManager: { getSessionId: () => "" },
 		} as unknown as ExtensionContext);
-		expect(closeWebSocketSessions).toHaveBeenCalledWith(undefined);
+		expect(cleanupResources).toHaveBeenCalledWith(undefined);
 	});
 
-	it("keeps compaction working if WebSocket close throws", () => {
-		const { ctx, handlers, sessionId, controller } = setup();
-		const closeWebSocketSessions = vi.fn(() => {
+	it("keeps compaction working if resource cleanup throws", () => {
+		const cleanupResources = vi.fn(() => {
 			throw new Error("socket already gone");
 		});
-		controller.setCloseWebSocketSessions(closeWebSocketSessions);
+		const { ctx, handlers, sessionId } = setup(true, cleanupResources);
 		expect(() => handlers.get("session_compact")?.({}, ctx)).not.toThrow();
-		expect(closeWebSocketSessions).toHaveBeenCalledWith(sessionId);
+		expect(cleanupResources).toHaveBeenCalledWith(sessionId);
 	});
 
 	it("reloads settings before scheduling", async () => {

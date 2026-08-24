@@ -13,7 +13,7 @@ function assistantError(errorMessage: string, provider = "cliproxyapi"): Assista
 	return {
 		role: "assistant",
 		content: [],
-		api: "cliproxyapi-codex-responses",
+		api: "openai-codex-responses",
 		provider,
 		model: "gpt-5.6-sol",
 		usage: {

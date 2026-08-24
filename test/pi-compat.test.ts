@@ -99,7 +99,7 @@ function createPiMock(commands: Map<string, Parameters<ExtensionAPI["registerCom
 	return { pi, handlers, modelRegistry, registeredModels, registeredProviders };
 }
 
-describe("pi 0.82.0 compatibility", () => {
+describe("Pi native provider compatibility", () => {
 	it("registers native API-key login and /fast without a dedicated /cliproxyapi command", async () => {
 		await withTempAgentDir(async () => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
@@ -493,7 +493,7 @@ describe("pi 0.82.0 compatibility", () => {
 				};
 				expect(provider.baseUrl).toBe("http://127.0.0.1:8317/backend-api/");
 				expect(provider.getModels()[0]).toEqual(
-					expect.objectContaining({ id: "claude-through-cpa", api: "cliproxyapi-codex-responses" }),
+					expect.objectContaining({ id: "claude-through-cpa", api: "openai-codex-responses" }),
 				);
 			} finally {
 				fetchMock.mockRestore();

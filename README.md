@@ -8,6 +8,7 @@ Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-
 
 - uses Pi's native API-key login and stores credentials only in `auth.json`;
 - standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
+- uses Pi's public stock `openai-codex-responses` stream without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
 - adds configurable `websocket`, `websocket-cached`, `auto`, and `sse` transports, with persistent WebSocket as the default;
 - resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
 - improves catalog mapping with native model refresh, opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
@@ -20,7 +21,7 @@ Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex cl
 2. Interactive setup collects `baseUrl` + `apiKey` via `/login CLIProxyAPI` or `/login cliproxyapi`.
 3. Fetches `{root}/v1/models?client_version=pi`.
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
-5. Registers inference against `{root}/backend-api/`.
+5. Registers inference against `{root}/backend-api/` with Pi's standard `openai-codex-responses` API metadata.
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
 7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json`, refreshes it in the background on startup, and provides `/cliproxyapi-refresh` to force a refresh.
 8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
@@ -109,7 +110,7 @@ Optional fields:
 | `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
-| `transport` | `websocket` | Request transport: persistent `websocket`, persistent incremental-context `websocket-cached`, stock fallback `auto`, or `sse` |
+| `transport` | `websocket` | Request transport: persistent full-context `websocket`, persistent incremental-context `websocket-cached`, stock automatic `auto`, or `sse` |
 | `useMaxContextWindow` | `false` | Use catalog `max_context_window` instead of standard `context_window` when available |
 
 ### Environment overrides
@@ -133,6 +134,8 @@ Resolution order for connection settings:
 
 The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`. Transport resolves as `CLIPROXYAPI_TRANSPORT` → `cliproxyapi.json` → `websocket`. Maximum context is opt-in via `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` → `cliproxyapi.json` → `false`.
 
+Pi's stock Codex transport behavior applies: `websocket`, `websocket-cached`, and `auto` may fall back to SSE when WebSocket setup fails before response streaming starts. A failure after events begin is surfaced instead of replaying the request over SSE. Use `sse` to disable WebSocket. Pi currently has no strict WebSocket-only option.
+
 ### baseUrl normalization
 
 Preferred form is **host:port only**:
@@ -145,6 +148,18 @@ Preferred form is **host:port only**:
 | `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 
 pi then sends inference traffic to `{inference}/codex/responses`. This fixed CLIProxyAPI client protocol is used for every discovered model. Pi can dispatch different models through different API implementations, but this extension intentionally leaves backend protocol translation to CLIProxyAPI instead of guessing from model IDs or origin metadata.
+
+### Codex authentication adapter
+
+Model discovery and login validation continue to send the real CPA key as `Authorization: Bearer <key>` to `/v1/models`. Only inference is adapted for Pi's stock Codex parser:
+
+```http
+Authorization: Bearer <synthetic-jwt>
+X-Api-Key: <real-cpa-key>
+chatgpt-account-id: cpa_<sha256-key-fingerprint>
+```
+
+The synthetic JWT contains no raw API key. It supplies the account claim required by Pi and gives each CPA key a stable, isolated WebSocket cache identity. CLIProxyAPI authenticates the request through `X-Api-Key`. Any reverse proxy or gateway in front of CLIProxyAPI must preserve that header; stripping it makes inference authentication fail.
 
 ## Fast mode
 
@@ -228,6 +243,10 @@ Unsupported pi thinking levels are set to `null` so they are hidden in the UI. O
 
 The raw `models.dev` response is cached for 24 hours at `~/.pi/agent/tmp/models-dev-cache.json`. A fresh cache avoids the network request; an expired cache is refreshed with a three-second timeout, and stale data is retained if refresh fails. If neither the network nor a previous cache is available, pricing safely falls back to zero. A small explicit alias table covers known CLIProxyAPI variants such as `gemini-pro-agent` → `gemini-3.1-pro-preview`; unknown variants are not guessed.
 
+## Migration from versions using the custom API id
+
+Versions through 1.4.13 stored new assistant messages with the custom `cliproxyapi-codex-responses` API id. New messages use Pi's standard `openai-codex-responses` id. Existing sessions do not need to be rewritten: Pi replays their older messages as foreign API metadata and normalizes tool-call ids before sending them through the stock Codex stream, including parallel tool calls.
+
 ## Migration from static models.json
 
 If you previously maintained a static provider such as `cpa-responses` in `~/.pi/agent/models.json`:
@@ -258,4 +277,5 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key
 - If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run `/login CLIProxyAPI` later after models become available.
 - If the selected model does not provide a non-empty `service_tiers` array: the request is left unchanged; `/fast` still updates the global preference and warns when enabling it.
+- If a gateway strips `X-Api-Key`: model discovery may still work, but inference fails because the `Authorization` header intentionally contains only the synthetic parser JWT.
 - After `/compact`, threshold compaction, or overflow recovery, the provider closes the reused Codex WebSocket for the current session. CLIProxyAPI binds server-side context to the connection, so a reused socket would keep reporting a near-full `cacheRead` and retrigger proactive compaction even though the client context is now small. SSE is unaffected because it bills from the request body.

@@ -9,8 +9,8 @@
  * 4. Pi stores the API key and base URL together in auth.json.
  * 5. `/fast` globally controls catalog-driven priority service tier injection.
  *
- * Uses a patched openai-codex-responses implementation that does not require
- * extracting chatgpt_account_id from the API key (plain CPA keys work).
+ * Uses Pi's stock openai-codex-responses implementation. Inference adapts the
+ * plain CPA key into X-Api-Key plus a non-secret synthetic Codex JWT.
  *
  * Non-interactive setup still works via env vars or ~/.pi/agent/cliproxyapi.json.
  */
@@ -526,11 +526,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			logWarn(`invalid transport configuration (${message}); using websocket`);
 			transport = "websocket";
 		}
-		const streams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"], {
+		const streams = loadCliproxyCodexStreams({
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 			transport,
 		});
-		proactiveCompaction.setCloseWebSocketSessions(streams.closeOpenAICodexWebSocketSessions);
 		stream = streams.stream;
 		streamSimple = proactiveCompaction.wrapStreamSimple(streams.streamSimple);
 	} catch (error) {

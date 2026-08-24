@@ -1,6 +1,12 @@
-import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	cleanupSessionResources,
+	createAssistantMessageEventStream,
+	type Model,
+} from "@earendil-works/pi-ai";
 import { type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
-import type { CliproxyCodexStreamSimple, CloseCodexWebSocketSessions } from "./codex-stream.ts";
+import type { CliproxyCodexStreamSimple } from "./codex-stream.ts";
 
 export const PROACTIVE_COMPACTION_ERROR_PREFIX = "context_length_exceeded: proactive compaction threshold reached";
 
@@ -9,7 +15,7 @@ export interface ProactiveCompactionSettings {
 	reserveTokens: number;
 }
 
-export type { CloseCodexWebSocketSessions };
+export type SessionResourceCleanup = (sessionId?: string) => void;
 
 /** Session id used to key pi-ai's reused Codex WebSocket. */
 export function resolveCompactionSessionId(source?: {
@@ -84,19 +90,12 @@ function createProactiveCompactionStream(model: Model<Api>, contextTokens: numbe
 export class ProactiveCompactionController {
 	private settingsManager: SettingsManager | undefined;
 	private pending: { modelKey: string; contextTokens: number; threshold: number } | undefined;
-	private closeWebSocketSessions: CloseCodexWebSocketSessions | undefined;
 
 	constructor(
 		private readonly agentDir: string,
 		private readonly providerId: string,
-		closeWebSocketSessions?: CloseCodexWebSocketSessions,
-	) {
-		this.closeWebSocketSessions = closeWebSocketSessions;
-	}
-
-	setCloseWebSocketSessions(closeWebSocketSessions: CloseCodexWebSocketSessions): void {
-		this.closeWebSocketSessions = closeWebSocketSessions;
-	}
+		private readonly cleanupResources: SessionResourceCleanup = cleanupSessionResources,
+	) {}
 
 	register(pi: ExtensionAPI): void {
 		pi.on("session_start", (_event, ctx) => {
@@ -109,9 +108,7 @@ export class ProactiveCompactionController {
 		pi.on("session_shutdown", () => {
 			this.settingsManager = undefined;
 			this.pending = undefined;
-			// Generated Codex modules keep their own socket caches. Close every socket
-			// owned by this extension instance before reload/session replacement.
-			this.resetWebSocketSession();
+			this.resetSessionResources();
 		});
 
 		pi.on("session_compact", (_event, ctx) => {
@@ -119,7 +116,7 @@ export class ProactiveCompactionController {
 			// CLIProxyAPI binds server-side Codex context to the WebSocket. Compaction
 			// only rewrites the client message list, so reuse would keep cacheRead high
 			// and retrigger proactive compaction on a now-small session.
-			this.resetWebSocketSession(resolveCompactionSessionId(ctx));
+			this.resetSessionResources(resolveCompactionSessionId(ctx));
 		});
 
 		pi.on("agent_settled", () => {
@@ -169,21 +166,18 @@ export class ProactiveCompactionController {
 			}
 
 			this.pending = undefined;
-			this.resetWebSocketSession(options?.sessionId);
+			this.resetSessionResources(options?.sessionId);
 			return createProactiveCompactionStream(model, pending.contextTokens, pending.threshold);
 		};
 	}
 
-	private resetWebSocketSession(sessionId?: string): void {
-		if (!this.closeWebSocketSessions) {
-			return;
-		}
+	private resetSessionResources(sessionId?: string): void {
 		try {
-			this.closeWebSocketSessions(sessionId);
+			this.cleanupResources(sessionId);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const scope = sessionId ? `session ${sessionId}` : "all sessions";
-			console.warn(`[pi-cliproxyapi-provider] failed to close Codex WebSocket for ${scope}: ${message}`);
+			console.warn(`[pi-cliproxyapi-provider] failed to clean Pi resources for ${scope}: ${message}`);
 		}
 	}
 

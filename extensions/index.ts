@@ -24,7 +24,7 @@ import type {
 	RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { ProactiveCompactionController } from "./auto-compact.ts";
+import { CompactionController } from "./auto-compact.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
 	type CliproxyCodexStream,
@@ -502,8 +502,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerPauseCommands({ pi, agentDir, pauseMode: pauseController });
 	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
 
-	const proactiveCompaction = new ProactiveCompactionController(agentDir, identity.providerId);
-	proactiveCompaction.register(pi);
+	const compaction = new CompactionController(agentDir, identity.providerId);
+	compaction.register(pi);
 
 	let fastEnabled = false;
 	try {
@@ -531,16 +531,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			transport,
 		});
 		stream = streams.stream;
-		streamSimple = proactiveCompaction.wrapStreamSimple(streams.streamSimple);
+		streamSimple = streams.streamSimple;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		logWarn(`failed to load Codex protocol: ${message}`);
 		return;
 	}
 
-	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
-		proactiveCompaction.getCompactionSettings(),
-	);
+	const fastFooter = new FastFooterController(identity.providerId, fastMode, () => compaction.getCompactionSettings());
 	let refreshModelsForFast: ((ctx: ExtensionContext) => Promise<void>) | undefined;
 	const onFastModeChange = async (_enabled: boolean, ctx: ExtensionContext): Promise<void> => {
 		await refreshModelsForFast?.(ctx);

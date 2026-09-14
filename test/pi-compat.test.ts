@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Api, Model, Provider } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, Provider } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
@@ -139,6 +139,87 @@ describe("Pi native provider compatibility", () => {
 				);
 				expect(provider.stream).not.toBe(provider.streamSimple);
 			} finally {
+				fetchMock.mockRestore();
+			}
+		});
+	});
+
+	it.each([
+		"none",
+		"short",
+	] as const)("passes the first request after an over-threshold tool turn to the provider (cacheRetention=%s)", async (cacheRetention) => {
+		await withTempAgentDir(async (agentDir) => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ compaction: { enabled: true, reserveTokens: 16384 } }),
+			);
+			writeFileSync(join(agentDir, "cliproxyapi.json"), JSON.stringify({ transport: "sse" }));
+			const { pi, handlers, registeredProviders } = createPiMock(new Map());
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(
+					'data: {"type":"response.completed","response":{"id":"summary-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}\n\n',
+					{
+						status: 200,
+						headers: { "Content-Type": "text/event-stream" },
+					},
+				),
+			);
+			const model = {
+				id: "gpt-5.6-sol",
+				provider: "cliproxyapi",
+				api: "openai-codex-responses",
+				baseUrl: "http://cpa.invalid/backend-api/",
+				contextWindow: 272000,
+				maxTokens: 16384,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			} as Model<"openai-codex-responses">;
+			const ctx = {
+				cwd: agentDir,
+				model,
+				mode: "print",
+				isProjectTrusted: () => false,
+				sessionManager: { getSessionId: () => "chat-session" },
+				getContextUsage: () => ({ tokens: 381727, contextWindow: 272000 }),
+			} as unknown as ExtensionContext;
+			try {
+				await providerExtension(pi);
+				for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+				const message: AssistantMessage = {
+					role: "assistant",
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+					usage: {
+						input: 381553,
+						output: 20,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 381573,
+						cost: { ...model.cost, total: 0 },
+					},
+				};
+				for (const handler of handlers.get("turn_end") ?? []) await handler({ message, toolResults: [{}] }, ctx);
+				const provider = registeredProviders.get("cliproxyapi") as unknown as Provider;
+				// Native compaction uses this same model, but a tiny one-off prompt and fresh routing ID.
+				const result = await provider
+					.streamSimple(
+						model,
+						{
+							messages: [{ role: "user", content: "Summarize this.", timestamp: Date.now() }],
+						},
+						{ apiKey: "test-key", cacheRetention, sessionId: "summary-session", transport: "sse" },
+					)
+					.result();
+				expect(result.errorMessage).toBeUndefined();
+				expect(result.stopReason).toBe("stop");
+				expect(fetchMock).toHaveBeenCalledTimes(1);
+			} finally {
+				for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, ctx);
 				fetchMock.mockRestore();
 			}
 		});

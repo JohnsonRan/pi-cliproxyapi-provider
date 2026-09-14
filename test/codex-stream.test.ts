@@ -18,6 +18,7 @@ import {
 	withCliproxyCodexAuth,
 	wrapStreamSimpleForCliproxyAuth,
 } from "../extensions/codex-stream.ts";
+import { SessionHierarchy } from "../extensions/session.ts";
 
 const REAL_API_KEY = "cpa-real-secret-key";
 
@@ -188,6 +189,32 @@ describe("CLIProxyAPI Codex authentication", () => {
 });
 
 describe("Pi stock Codex streams", () => {
+	it.each([
+		"stream",
+		"streamSimple",
+	] as const)("preserves parent identity through stock WebSocket %s without altering cache identity", async (method) => {
+		vi.stubGlobal("WebSocket", FakeWebSocket);
+		const hierarchy = new SessionHierarchy();
+		const streams = loadCliproxyCodexStreams({
+			transport: "websocket",
+			getSessionHeaders: (options) => hierarchy.headers(options),
+		});
+		const result = await streams[method](
+			createModel(),
+			{ messages: [userMessage("hello")] },
+			{
+				apiKey: REAL_API_KEY,
+				sessionId: "child-id",
+				metadata: { parent_session_id: "parent-id" },
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		const headers = toHeaders(FakeWebSocket.instances[0]?.options.headers);
+		expect(headers.get("session-id")).toBe("child-id");
+		expect(headers.get("x-codex-parent-thread-id")).toBe("parent-id");
+		expect(FakeWebSocket.instances[0]?.sent[0]?.prompt_cache_key).toBe("child-id");
+	});
+
 	it("sends SSE through the public stock API with split auth and Fast payload shaping", async () => {
 		let requestUrl: string | undefined;
 		let requestHeaders: IncomingHttpHeaders | undefined;
@@ -221,6 +248,7 @@ describe("Pi stock Codex streams", () => {
 			const streams = loadCliproxyCodexStreams({
 				transport: "sse",
 				shouldUseFast: () => true,
+				getSessionHeaders: (options) => new SessionHierarchy().headers(options),
 			});
 			const result = await streams
 				.streamSimple(
@@ -228,6 +256,8 @@ describe("Pi stock Codex streams", () => {
 					{ messages: [userMessage("hello")] },
 					{
 						apiKey: REAL_API_KEY,
+						sessionId: "sse-child",
+						metadata: { parent_session_id: "sse-parent" },
 						onPayload: (payload) => {
 							observedPayload = payload;
 						},
@@ -242,6 +272,8 @@ describe("Pi stock Codex streams", () => {
 				"opaque-signature",
 			);
 			expect(requestUrl).toBe("/backend-api/codex/responses");
+			expect(requestHeaders?.["session-id"]).toBe("sse-child");
+			expect(requestHeaders?.["x-codex-parent-thread-id"]).toBe("sse-parent");
 			expect(requestHeaders?.["x-api-key"]).toBe(REAL_API_KEY);
 			const authorization = requestHeaders?.authorization;
 			expect(authorization).toBe(`Bearer ${createSyntheticCodexJwt(REAL_API_KEY)}`);

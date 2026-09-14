@@ -18,7 +18,7 @@ export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 export const CONFIG_FILE_NAME = "cliproxyapi.json";
 export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
 export const AUTH_FILE_NAME = "auth.json";
-export const CLIENT_VERSION = "pi";
+export const CLIENT_VERSION = "cpa";
 export const MODELS_REQUEST_TIMEOUT_MS = 60_000;
 
 export const MODELS_DEV_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -35,6 +35,7 @@ export interface CliproxyConfigFile {
 	providerId?: string;
 	providerName?: string;
 	fast?: boolean;
+	webSearch?: boolean;
 	pause?: boolean;
 	transport?: CliproxyTransport;
 	useMaxContextWindow?: boolean;
@@ -90,6 +91,7 @@ export interface CodexClientModel {
 	additional_speed_tiers?: string[];
 	apply_patch_tool_type?: string;
 	visibility?: string;
+	cpa_capabilities?: { web_search?: boolean };
 }
 
 export interface CodexClientModelsResponse {
@@ -131,6 +133,8 @@ export interface PiProviderModel {
 export interface MappedModels {
 	models: PiProviderModel[];
 	fastModelIds: string[];
+	/** Only explicit true capability claims; absent on older caches. */
+	webSearchModelIds?: string[];
 	modelsUrl: string;
 	fastMode?: boolean;
 	useMaxContextWindow?: boolean;
@@ -195,7 +199,7 @@ export function firstNonEmpty(...values: Array<string | undefined | null>): stri
  * Preferred input: host:port (e.g. http://127.0.0.1:8317)
  * - /backend-api kept as-is for inference
  * - /v1 rewritten to /backend-api for inference
- * - models always at {root}/v1/models?client_version=pi
+ * - models always at {root}/v1/models?client_version=cpa
  */
 export function resolveEndpoints(baseUrlInput: string): {
 	inferenceBaseUrl: string;
@@ -287,7 +291,8 @@ export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsC
 		const endpoints = resolveEndpoints(baseUrlInput);
 		if (
 			typeof parsed.fetchedAt !== "number" ||
-			parsed.modelsUrl !== endpoints.modelsUrl ||
+			(parsed.modelsUrl !== endpoints.modelsUrl &&
+				parsed.modelsUrl !== endpoints.modelsUrl.replace("client_version=cpa", "client_version=pi")) ||
 			!Array.isArray(parsed.models) ||
 			!Array.isArray(parsed.fastModelIds)
 		) {
@@ -375,6 +380,22 @@ export function resolveFastDefault(agentDir: string): boolean {
 		throw new Error(`${CONFIG_FILE_NAME} field "fast" must be a boolean`);
 	}
 	return file.fast;
+}
+
+/** Resolve native web search opt-in from env/config, defaulting to false. */
+export function resolveWebSearchDefault(agentDir: string): boolean {
+	const envValue = firstNonEmpty(process.env.CLIPROXYAPI_WEB_SEARCH);
+	if (envValue !== undefined) {
+		const parsed = parseBooleanSetting(envValue);
+		if (parsed === undefined) {
+			throw new Error("CLIPROXYAPI_WEB_SEARCH must be one of: true, false, 1, 0, yes, no, on, off");
+		}
+		return parsed;
+	}
+	const value = loadConfigFile(agentDir).webSearch;
+	if (value === undefined) return false;
+	if (typeof value !== "boolean") throw new Error(`${CONFIG_FILE_NAME} field "webSearch" must be a boolean`);
+	return value;
 }
 
 /** Resolve opt-in maximum context windows from env/config, defaulting to false. */
@@ -954,6 +975,18 @@ export async function loadMappedModels(
 	return {
 		models,
 		fastModelIds,
+		webSearchModelIds: Array.from(
+			new Set(
+				remoteModels
+					.filter(
+						(model) =>
+							model.cpa_capabilities?.web_search === true &&
+							String(model.visibility ?? "").toLowerCase() !== "hide",
+					)
+					.map(codexModelId)
+					.filter(Boolean),
+			),
+		),
 		modelsUrl: endpoints.modelsUrl,
 		...(pricingEnabled ? { fastMode: effectiveFastMode } : {}),
 		useMaxContextWindow,

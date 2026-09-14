@@ -1,5 +1,6 @@
 /** Shared pause state for request gating and elapsed-time accounting. */
 
+import { setTimeout as delay } from "node:timers/promises";
 import { resolvePauseDefault } from "./lib.ts";
 
 export const PAUSE_POLL_INTERVAL_MS = 200;
@@ -55,11 +56,13 @@ function readPauseSetting(agentDir: string, fallback = false): boolean {
 export async function waitForPauseToEnd(
 	agentDir: string,
 	controller: PauseController = pauseController,
+	signal?: AbortSignal,
 ): Promise<void> {
 	while (true) {
+		signal?.throwIfAborted();
 		const enabled = readPauseSetting(agentDir, controller.isEnabled());
 		controller.setEnabled(enabled);
 		if (!enabled) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, PAUSE_POLL_INTERVAL_MS));
+		await delay(PAUSE_POLL_INTERVAL_MS, undefined, { signal });
 	}
 }

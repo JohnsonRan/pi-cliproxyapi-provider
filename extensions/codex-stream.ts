@@ -14,12 +14,14 @@ import type {
 	Context,
 	Model,
 	Provider,
+	ProviderHeaders,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
 	StreamOptions,
 } from "@earendil-works/pi-ai";
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
 import type { CliproxyTransport } from "./lib.ts";
+import { mergeSessionHeaders } from "./session.ts";
 
 export const CLIPROXYAPI_CODEX_API = "openai-codex-responses" as const;
 
@@ -43,6 +45,7 @@ export type CliproxyCodexStreams = {
 
 export interface CliproxyCodexStreamOptions {
 	shouldUseFast?: (model: Model<Api>) => boolean;
+	getSessionHeaders?: (options?: StreamOptions) => ProviderHeaders;
 	transport?: CliproxyTransport;
 }
 
@@ -179,11 +182,36 @@ export function wrapCodexStreamForFast(
 	) as CliproxyCodexStream;
 }
 
+function wrapStreamForSession<TOptions extends StreamOptions>(
+	stream: CliproxyCodexStreamFunction<TOptions>,
+	getHeaders?: CliproxyCodexStreamOptions["getSessionHeaders"],
+): CliproxyCodexStreamFunction<TOptions> {
+	return (model, context, options) => {
+		const headers = getHeaders?.(options) ?? {};
+		return stream(
+			model,
+			context,
+			Object.keys(headers).length === 0
+				? options
+				: ({
+						...options,
+						headers: mergeSessionHeaders(mergeSessionHeaders(headers, model.headers), options?.headers),
+					} as TOptions),
+		);
+	};
+}
+
 export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {}): CliproxyCodexStreams {
 	const stock = openAICodexResponsesApi();
 	const transport = options.transport ?? "websocket";
-	const stockStreamSimple = stock.streamSimple as CliproxyCodexStreamSimple;
-	const stockStream = stock.stream as CliproxyCodexStream;
+	const stockStreamSimple = wrapStreamForSession(
+		stock.streamSimple as CliproxyCodexStreamSimple,
+		options.getSessionHeaders,
+	);
+	const stockStream = wrapStreamForSession(
+		stock.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
+		options.getSessionHeaders,
+	) as CliproxyCodexStream;
 	const streamSimple = wrapStreamSimpleForFast(
 		wrapStreamSimpleForTransport(wrapStreamSimpleForCliproxyAuth(stockStreamSimple), transport),
 		options.shouldUseFast,

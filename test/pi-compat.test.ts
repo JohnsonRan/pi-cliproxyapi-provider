@@ -16,6 +16,8 @@ const CLIPROXYAPI_ENV_NAMES = [
 	"CLIPROXYAPI_API_KEY",
 	"CLIPROXYAPI_BASE_URL",
 	"CLIPROXYAPI_FAST",
+	"CLIPROXYAPI_WEB_SEARCH",
+	"CLIPROXYAPI_PARENT_SESSION_ID",
 	"CLIPROXYAPI_PROVIDER_ID",
 	"CLIPROXYAPI_PROVIDER_NAME",
 	"CLIPROXYAPI_TRANSPORT",
@@ -88,6 +90,7 @@ function createPiMock(commands: Map<string, Parameters<ExtensionAPI["registerCom
 				});
 			}
 		}),
+		registerTool: vi.fn(),
 		setModel: vi.fn(async () => true),
 		on: vi.fn((event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -115,7 +118,8 @@ describe("Pi native provider compatibility", () => {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).not.toHaveBeenCalled();
 
-				expect(commands.size).toBe(4);
+				expect(commands.size).toBe(5);
+				expect(commands.has("cliproxyapi-search")).toBe(true);
 				expect(commands.has("fast")).toBe(true);
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
@@ -180,7 +184,7 @@ describe("Pi native provider compatibility", () => {
 				model,
 				mode: "print",
 				isProjectTrusted: () => false,
-				sessionManager: { getSessionId: () => "chat-session" },
+				sessionManager: { getSessionId: () => "chat-session", getHeader: () => null, getEntries: () => [] },
 				getContextUsage: () => ({ tokens: 381727, contextWindow: 272000 }),
 			} as unknown as ExtensionContext;
 			try {
@@ -313,7 +317,7 @@ describe("Pi native provider compatibility", () => {
 				if (String(input).startsWith("https://models.dev/")) {
 					return new Response(JSON.stringify({}), { status: 200 });
 				}
-				expect(String(input)).toBe("http://new.example/v1/models?client_version=pi");
+				expect(String(input)).toBe("http://new.example/v1/models?client_version=cpa");
 				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer new-key");
 				return new Response(JSON.stringify({ models: [{ slug: "runtime-model" }] }), { status: 200 });
 			});
@@ -349,7 +353,7 @@ describe("Pi native provider compatibility", () => {
 					}),
 				);
 				expect(fetchMock).toHaveBeenCalledWith(
-					"http://new.example/v1/models?client_version=pi",
+					"http://new.example/v1/models?client_version=cpa",
 					expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer new-key" }) }),
 				);
 			} finally {
@@ -366,7 +370,7 @@ describe("Pi native provider compatibility", () => {
 				if (String(input).startsWith("https://models.dev/")) {
 					return new Response(JSON.stringify({}), { status: 200 });
 				}
-				expect(String(input)).toBe("http://env.example/v1/models?client_version=pi");
+				expect(String(input)).toBe("http://env.example/v1/models?client_version=cpa");
 				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer env-key");
 				return new Response(JSON.stringify({ models: [] }), { status: 200 });
 			});
@@ -461,6 +465,48 @@ describe("Pi native provider compatibility", () => {
 				};
 				await provider.refreshModels?.({ allowNetwork: true });
 				expect(provider.getModels().map((model) => model.id)).toEqual(["model-2"]);
+			} finally {
+				fetchMock.mockRestore();
+			}
+		});
+	});
+
+	it("updates native search eligibility through the same provider refresh lifecycle", async () => {
+		await withTempAgentDir(async (agentDir) => {
+			writeFileSync(
+				join(agentDir, "cliproxyapi.json"),
+				JSON.stringify({ baseUrl: "http://cpa.invalid", apiKey: "key", webSearch: true }),
+			);
+			const { pi, registeredProviders, registeredModels } = createPiMock(new Map());
+			let supported = true;
+			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				if (String(input).startsWith("https://models.dev/")) return new Response("{}");
+				return new Response(
+					JSON.stringify({ models: [{ slug: "search-model", cpa_capabilities: { web_search: supported } }] }),
+				);
+			});
+			try {
+				await providerExtension(pi);
+				const tool = vi.mocked(pi.registerTool).mock.calls.find(([tool]) => tool.name === "cliproxyapi_search")![0];
+				const model = registeredModels.get("cliproxyapi/search-model")!;
+				const getAuth = vi.fn(async () => ({ ok: false, error: "test auth boundary" }));
+				const ctx = {
+					model,
+					modelRegistry: { find: () => model, getApiKeyAndHeaders: getAuth },
+				} as unknown as ExtensionContext;
+				await expect(tool.execute("test", { query: "news" }, undefined, undefined, ctx)).rejects.toThrow(
+					"test auth boundary",
+				);
+				expect(getAuth).toHaveBeenCalledTimes(1);
+				supported = false;
+				const provider = registeredProviders.get("cliproxyapi") as unknown as Provider;
+				await provider.refreshModels?.({ allowNetwork: true } as Parameters<
+					NonNullable<Provider["refreshModels"]>
+				>[0]);
+				await expect(tool.execute("test", { query: "news" }, undefined, undefined, ctx)).rejects.toThrow(
+					"explicit web_search support",
+				);
+				expect(getAuth).toHaveBeenCalledTimes(1);
 			} finally {
 				fetchMock.mockRestore();
 			}

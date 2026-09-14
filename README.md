@@ -19,7 +19,7 @@ Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex cl
 
 1. Registers a native API-key provider that always appears in `/login`.
 2. Interactive setup collects `baseUrl` + `apiKey` via `/login CLIProxyAPI` or `/login cliproxyapi`.
-3. Fetches `{root}/v1/models?client_version=pi`.
+3. Fetches `{root}/v1/models?client_version=cpa`, including explicit native search capability metadata.
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
 5. Registers inference against `{root}/backend-api/` with Pi's standard `openai-codex-responses` API metadata.
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
@@ -68,7 +68,7 @@ Then choose **CLIProxyAPI** from API-key providers and enter:
    - base URL — preferred form is host:port, e.g. `http://127.0.0.1:8317`
    - API key
 
-Final login validation calls `{root}/v1/models?client_version=pi` (this always bypasses the model cache and forces a fresh remote query):
+Final login validation calls `{root}/v1/models?client_version=cpa` (this always bypasses the model cache and forces a fresh remote query):
 
 - **HTTP 200** → login succeeds (empty model list is still OK) and the model cache is rewritten
 - **non-200 / network error** → login fails and you are prompted to re-enter base URL + API key
@@ -94,6 +94,7 @@ You can still configure without `/login`.
   "baseUrl": "http://127.0.0.1:8317",
   "apiKey": "12345",
   "fast": false,
+  "webSearch": false,
   "pause": false,
   "transport": "websocket",
   "useMaxContextWindow": false
@@ -109,6 +110,7 @@ Optional fields:
 | `providerId` | `cliproxyapi` | Provider id shown in `/model` |
 | `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
+| `webSearch` | `false` | Enable the `cliproxyapi_search` tool for models with explicit native search support |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
 | `transport` | `websocket` | Request transport: persistent full-context `websocket`, persistent incremental-context `websocket-cached`, stock automatic `auto`, or `sse` |
 | `useMaxContextWindow` | `false` | Use catalog `max_context_window` instead of standard `context_window` when available |
@@ -122,6 +124,8 @@ Optional fields:
 | `CLIPROXYAPI_PROVIDER_ID` | `providerId` |
 | `CLIPROXYAPI_PROVIDER_NAME` | `providerName` |
 | `CLIPROXYAPI_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
+| `CLIPROXYAPI_WEB_SEARCH` | `webSearch` (same boolean forms as `CLIPROXYAPI_FAST`) |
+| `CLIPROXYAPI_PARENT_SESSION_ID` | Explicit immediate parent session ID supplied by a child launcher; not a root ID or file path |
 | `CLIPROXYAPI_TRANSPORT` | `transport` (`websocket`, `websocket-cached`, `auto`, or `sse`) |
 | `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` | `useMaxContextWindow` (same boolean forms as `CLIPROXYAPI_FAST`) |
 
@@ -142,7 +146,7 @@ Preferred form is **host:port only**:
 
 | Input | Inference baseUrl | Models URL |
 | ------- | ------------------- | ------------ |
-| `http://127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | `http://127.0.0.1:8317/v1/models?client_version=pi` |
+| `http://127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | `http://127.0.0.1:8317/v1/models?client_version=cpa` |
 | `http://127.0.0.1:8317/backend-api` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 | `http://127.0.0.1:8317/v1` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 | `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
@@ -177,6 +181,37 @@ When Fast is effective, pi's model status appends a yellow lowercase `fast`, for
 
 Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast injects `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level. When `models.dev` provides `experimental.modes.fast.cost`, the registered model cost switches to those Fast rates as well; the provider is refreshed when `/fast` is toggled. If no Fast price is published, the standard price is retained. The plugin does not guess Fast prices from `-pro`/`-fast` model IDs.
 
+## Native web search (CLIProxyAPI v7.3.1+)
+
+Native search is **off by default**. It is a separate tool, not a rewrite of Pi's chat streaming runtime:
+
+```text
+/cliproxyapi-refresh
+/cliproxyapi-search on
+/cliproxyapi-search status
+/cliproxyapi-search off
+```
+
+Enabling registers `cliproxyapi_search`. It takes `query` and an optional exact CPA `model` ID, defaulting to the current model. A different search model can be selected without changing the chat model. Only visible models explicitly advertising `cpa_capabilities.web_search: true` are eligible; missing, false, or malformed capability claims never enable search. There is no provider-name inference or silent fallback to an ungrounded model answer.
+
+The tool sends **only the query**, not conversation history, to `{root}/v1/responses` with the native `web_search` tool and `stream: false`. This keeps search results and citation URLs intact without modifying Pi's SSE/WebSocket parser. The result includes answer text, deduplicated HTTP(S) source URLs, and nested token usage. Results that report no completed search fail rather than masquerading as web results; incomplete answers are marked. Text is limited to 50KB/2000 lines, source details to 100 URLs, response bodies to 2 MiB, and each HTTP request to two minutes. Abort and `/pause` are honored. Normal chat transport is unchanged.
+
+This is an **additional model request** and may incur native search fees. Token costs use the model catalog rates; separate per-search charges are not included. Catalog-supported `/fast` applies to the search request too. The tool reuses Pi's resolved model credentials and headers; it does not store another API key.
+
+`CLIPROXYAPI_WEB_SEARCH` overrides `webSearch` at startup. The command changes the current session and persisted preference; an environment override still wins on the next startup. Turning the tool off prevents new calls, but does not cancel an HTTP request already in progress.
+
+## Session hierarchy
+
+Inference preserves Pi's existing session/cache ID and adds `X-Codex-Parent-Thread-Id` when a real parent is known:
+
+- For saved session ancestry (`/fork`, `/clone`, or `newSession({ parentSession })`), read only the referenced parent file's header ID. Missing/malformed parent files are ignored; filenames and conversation text are never used to guess IDs.
+- Child launchers can explicitly supply `CLIPROXYAPI_PARENT_SESSION_ID` with the **immediate** parent ID. It is bound on startup only when no saved parent resolves, then stored as a non-context custom session entry containing only the two IDs. Reload/resume restores it only for that exact session; it is not inherited into a new/resumed unrelated session.
+- SDK stream callers can pass `metadata: { parent_session_id: "..." }` together with their own `sessionId`. Explicit caller headers, including null suppression, take precedence.
+
+`PI_SUBAGENT_PARENT_SESSION` is deliberately ignored: pi-subagents uses it for the root permission-routing session, not necessarily the direct parent. Fresh children without a saved parent or explicit launcher/request metadata remain unlinked. No pi-subagents internals are imported.
+
+Native compaction (`cacheRetention: "none"`) and calls using another session ID are not assigned the active chat's parent. Session shutdown clears captured ancestry. Native search requests use the current session ID and known parent for usage attribution.
+
 ## Pausing provider requests
 
 Pause provider requests with:
@@ -199,7 +234,7 @@ The provider keeps a separate cache file so startup stays fast when CLIProxyAPI 
 
 `~/.pi/agent/cliproxyapi-models.json`
 
-The cache stores only model metadata and derived endpoint URLs — the model list, Fast-capable IDs, `inferenceBaseUrl`, `modelsUrl`, and a `fetchedAt` timestamp. It **never** stores your API key or other credentials.
+The cache stores only model metadata and derived endpoint URLs — the model list, Fast-capable IDs, native-search-capable IDs, `modelsUrl`, and a `fetchedAt` timestamp. Legacy `client_version=pi` caches remain usable offline; capability discovery refreshes them using `client_version=cpa`. It **never** stores your API key or other credentials.
 
 | Property | Value |
 |----------|-------|
@@ -211,7 +246,7 @@ The cache stores only model metadata and derived endpoint URLs — the model lis
 
 When the provider loads (including session resume):
 
-1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=pi` then runs in the background; on success, the cache is rewritten and the registered model list is refreshed. If the query fails, the existing cache remains active.
+1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=cpa` then runs in the background; on success, the cache is rewritten and the registered model list is refreshed. If the query fails, the existing cache remains active.
 2. If no matching cache exists, the remote query runs synchronously. On success, the cache is written and the fetched models are registered. If it fails, startup logs a warning and no models are registered until the proxy responds.
 
 Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog. The provider also exposes Pi's native `refreshModels` lifecycle, so runtime-wide model refreshes use the same remote catalog and cache path.
@@ -238,6 +273,7 @@ From CPA catalog entry → pi model:
 | `supported_reasoning_levels[].effort` | `thinkingLevelMap` + `reasoning` |
 | `apply_patch_tool_type: "freeform"` | enables Pi OpenAI grammar/freeform tools |
 | `visibility: "hide"` | skipped |
+| `cpa_capabilities.web_search: true` | native search eligibility (separate from Pi deferred tool search) |
 
 Unsupported pi thinking levels are set to `null` so they are hidden in the UI. Output limits resolve in this order: CPA `max_tokens`, CPA `max_completion_tokens`, matching models.dev `limit.output`, then `16384`. CPA exposes this as model-catalog metadata on supported versions; it is a client budgeting value, not a guarantee that every backend enforces the same limit. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller data is not selected arbitrarily, and prices fall back to zero.
 

@@ -31,6 +31,7 @@ import {
 	resolveIdentity,
 	resolveTransportDefault,
 	resolveUseMaxContextWindow,
+	resolveWebSearchDefault,
 	saveConfigFile,
 	supportsFastServiceTier,
 	toPiModel,
@@ -96,30 +97,51 @@ describe("resolveEndpoints", () => {
 		const result = resolveEndpoints("http://127.0.0.1:8317");
 		expect(result).toEqual({
 			inferenceBaseUrl: "http://127.0.0.1:8317/backend-api/",
-			modelsUrl: "http://127.0.0.1:8317/v1/models?client_version=pi",
+			modelsUrl: "http://127.0.0.1:8317/v1/models?client_version=cpa",
 		});
 	});
 
 	it("keeps /backend-api for inference", () => {
 		const result = resolveEndpoints("http://127.0.0.1:8317/backend-api");
 		expect(result.inferenceBaseUrl).toBe("http://127.0.0.1:8317/backend-api/");
-		expect(result.modelsUrl).toBe("http://127.0.0.1:8317/v1/models?client_version=pi");
+		expect(result.modelsUrl).toBe("http://127.0.0.1:8317/v1/models?client_version=cpa");
 	});
 
 	it("rewrites /v1 to /backend-api for inference", () => {
 		const result = resolveEndpoints("http://127.0.0.1:8317/v1");
 		expect(result.inferenceBaseUrl).toBe("http://127.0.0.1:8317/backend-api/");
-		expect(result.modelsUrl).toBe("http://127.0.0.1:8317/v1/models?client_version=pi");
+		expect(result.modelsUrl).toBe("http://127.0.0.1:8317/v1/models?client_version=cpa");
 	});
 
 	it("adds http scheme when missing", () => {
 		const result = resolveEndpoints("127.0.0.1:8317");
 		expect(result.inferenceBaseUrl).toBe("http://127.0.0.1:8317/backend-api/");
-		expect(result.modelsUrl).toBe("http://127.0.0.1:8317/v1/models?client_version=pi");
+		expect(result.modelsUrl).toBe("http://127.0.0.1:8317/v1/models?client_version=cpa");
 	});
 
 	it("throws on empty baseUrl", () => {
 		expect(() => resolveEndpoints("   ")).toThrow(/baseUrl is empty/);
+	});
+});
+
+describe("native search opt-in", () => {
+	it("defaults off, honors env precedence, and rejects malformed settings", () => {
+		const dir = tempAgentDir();
+		vi.stubEnv("CLIPROXYAPI_WEB_SEARCH", "");
+		try {
+			expect(resolveWebSearchDefault(dir)).toBe(false);
+			saveConfigFile(dir, { webSearch: true });
+			expect(resolveWebSearchDefault(dir)).toBe(true);
+			vi.stubEnv("CLIPROXYAPI_WEB_SEARCH", "off");
+			expect(resolveWebSearchDefault(dir)).toBe(false);
+			vi.stubEnv("CLIPROXYAPI_WEB_SEARCH", "perhaps");
+			expect(() => resolveWebSearchDefault(dir)).toThrow("CLIPROXYAPI_WEB_SEARCH");
+			vi.stubEnv("CLIPROXYAPI_WEB_SEARCH", "");
+			writeFileSync(join(dir, CONFIG_FILE_NAME), JSON.stringify({ webSearch: "true" }));
+			expect(() => resolveWebSearchDefault(dir)).toThrow("must be a boolean");
+		} finally {
+			vi.unstubAllEnvs();
+		}
 	});
 });
 

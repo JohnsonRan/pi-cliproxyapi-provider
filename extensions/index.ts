@@ -4,7 +4,7 @@
  * Supports native API-key setup via `/login`:
  * 1. Preferred shortcuts: `/login CLIProxyAPI` or `/login cliproxyapi`.
  * 2. Setup prompts for baseUrl + apiKey.
- * 3. Final login step validates credentials via /v1/models?client_version=pi
+ * 3. Final login step validates credentials via /v1/models?client_version=cpa
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
  * 4. Pi stores the API key and base URL together in auth.json.
  * 5. `/fast` globally controls catalog-driven priority service tier injection.
@@ -40,6 +40,7 @@ import {
 	isUnauthorizedModelsError,
 	loadAuthConnection,
 	loadConfigFile,
+	type MappedModels,
 	type PiProviderModel,
 	resolveConnection,
 	resolveConnectionSources,
@@ -50,11 +51,14 @@ import {
 	resolvePauseDefault,
 	resolveTransportDefault,
 	resolveUseMaxContextWindow,
+	resolveWebSearchDefault,
 	saveConfigFile,
 } from "./lib.ts";
 import type { PauseController } from "./pause.ts";
 import { pauseController, waitForPauseToEnd } from "./pause.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
+import { registerNativeSearch } from "./search.ts";
+import { SessionHierarchy } from "./session.ts";
 
 interface RefreshResult {
 	modelCount: number;
@@ -86,8 +90,16 @@ function logInfo(message: string): void {
 	console.info(`[pi-cliproxyapi-provider] ${message}`);
 }
 
-function setFastModelIds(fastMode: FastModeController, modelIds: string[]): void {
-	fastMode.setSupportedModelIds(modelIds);
+function setModelCapabilities(
+	fastMode: FastModeController,
+	webSearchModelIds: Set<string>,
+	loaded: MappedModels,
+): void {
+	fastMode.setSupportedModelIds(loaded.fastModelIds);
+	webSearchModelIds.clear();
+	for (const id of loaded.webSearchModelIds ?? []) {
+		if (typeof id === "string" && id.trim()) webSearchModelIds.add(id.trim());
+	}
 }
 
 function useMaxContextWindow(agentDir: string): boolean {
@@ -133,6 +145,7 @@ function registerProvider(
 		stream: CliproxyCodexStream;
 		streamSimple: CliproxyCodexStreamSimple;
 		fastMode: FastModeController;
+		webSearchModelIds: Set<string>;
 		refreshCoordinator: ModelRefreshCoordinator;
 	},
 ): void {
@@ -145,6 +158,7 @@ function registerProvider(
 		stream,
 		streamSimple,
 		fastMode,
+		webSearchModelIds,
 		refreshCoordinator,
 	} = options;
 	const inferenceBaseUrl = resolveEndpoints(baseUrlInput).inferenceBaseUrl;
@@ -227,7 +241,7 @@ function registerProvider(
 					throw new Error("Model refresh was superseded by a newer request.");
 				}
 				currentModels = bindModels(loaded.models, resolveEndpoints(baseUrl).inferenceBaseUrl);
-				setFastModelIds(fastMode, loaded.fastModelIds);
+				setModelCapabilities(fastMode, webSearchModelIds, loaded);
 				const credential: ApiKeyCredential = {
 					type: "api_key",
 					key: apiKey,
@@ -308,7 +322,7 @@ function registerProvider(
 			});
 			if (!refreshCoordinator.isCurrent(refresh.generation)) return;
 			currentModels = bindModels(loaded.models, resolveEndpoints(connection.baseUrl).inferenceBaseUrl);
-			setFastModelIds(fastMode, loaded.fastModelIds);
+			setModelCapabilities(fastMode, webSearchModelIds, loaded);
 		},
 		stream,
 		streamSimple,
@@ -361,8 +375,8 @@ export function registerPauseCommands(options: {
 
 export function registerPauseGuard(options: { pi: ExtensionAPI; agentDir: string; pauseMode: PauseController }): void {
 	const { pi, agentDir, pauseMode } = options;
-	pi.on("before_provider_request", async () => {
-		await waitForPauseToEnd(agentDir, pauseMode);
+	pi.on("before_provider_request", async (_event, ctx) => {
+		await waitForPauseToEnd(agentDir, pauseMode, ctx.signal);
 	});
 }
 
@@ -502,6 +516,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerPauseCommands({ pi, agentDir, pauseMode: pauseController });
 	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
 
+	const hierarchy = new SessionHierarchy();
+	hierarchy.register(pi);
 	const compaction = new CompactionController(agentDir, identity.providerId);
 	compaction.register(pi);
 
@@ -513,6 +529,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logWarn(`invalid Fast configuration (${message}); using fast=false`);
 	}
 	const fastMode = new FastModeController(fastEnabled);
+	const webSearchModelIds = new Set<string>();
+	let webSearchEnabled = false;
+	try {
+		webSearchEnabled = resolveWebSearchDefault(agentDir);
+	} catch (error) {
+		logWarn(
+			`invalid native search configuration (${error instanceof Error ? error.message : String(error)}); using webSearch=false`,
+		);
+	}
 	const modelRefreshCoordinator = new ModelRefreshCoordinator();
 
 	let stream: CliproxyCodexStream;
@@ -528,6 +553,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 		const streams = loadCliproxyCodexStreams({
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
+			getSessionHeaders: (options) => hierarchy.headers(options),
 			transport,
 		});
 		stream = streams.stream;
@@ -537,6 +563,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logWarn(`failed to load Codex protocol: ${message}`);
 		return;
 	}
+
+	registerNativeSearch({
+		pi,
+		agentDir,
+		providerId: identity.providerId,
+		enabled: webSearchEnabled,
+		isSupported: (id) => webSearchModelIds.has(id),
+		shouldUseFast: (id) => fastMode.isEffectiveFor(id),
+		hierarchy,
+	});
 
 	const fastFooter = new FastFooterController(identity.providerId, fastMode, () => compaction.getCompactionSettings());
 	let refreshModelsForFast: ((ctx: ExtensionContext) => Promise<void>) | undefined;
@@ -562,6 +598,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		stream,
 		streamSimple,
 		fastMode,
+		webSearchModelIds,
 		refreshCoordinator: modelRefreshCoordinator,
 	});
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
@@ -587,7 +624,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			);
 			if (!modelRefreshCoordinator.isCurrent(refresh.generation)) return undefined;
 
-			setFastModelIds(fastMode, loaded.fastModelIds);
+			setModelCapabilities(fastMode, webSearchModelIds, loaded);
 
 			registerProvider(pi, {
 				providerId: identity.providerId,
@@ -598,6 +635,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				stream,
 				streamSimple,
 				fastMode,
+				webSearchModelIds,
 				refreshCoordinator: modelRefreshCoordinator,
 			});
 

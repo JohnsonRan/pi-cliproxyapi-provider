@@ -23,6 +23,8 @@ const CLIPROXYAPI_ENV_NAMES = [
 	"CLIPROXYAPI_API_KEY",
 	"CLIPROXYAPI_BASE_URL",
 	"CLIPROXYAPI_FAST",
+	"CLIPROXYAPI_WEB_SEARCH",
+	"CLIPROXYAPI_PARENT_SESSION_ID",
 	"CLIPROXYAPI_PROVIDER_ID",
 	"CLIPROXYAPI_PROVIDER_NAME",
 	"CLIPROXYAPI_TRANSPORT",
@@ -152,6 +154,42 @@ describe("models cache helpers", () => {
 		expect(cache).toEqual({ ...loaded, fetchedAt });
 	});
 
+	it("keeps old pi catalog caches usable offline without inventing search capabilities", async () => {
+		const dir = tempAgentDir();
+		const cached = createMappedModels({ models: [createModel("old-model")] });
+		cached.modelsUrl = cached.modelsUrl.replace("client_version=cpa", "client_version=pi");
+		saveModelsCache(dir, cached, 1);
+		expect(loadModelsCache(dir, "http://127.0.0.1:8317")?.models[0].id).toBe("old-model");
+		expect(loadModelsCache(dir, "http://127.0.0.1:8317")?.webSearchModelIds).toBeUndefined();
+	});
+
+	it("caches only visible models with explicit true native search claims", async () => {
+		const dir = tempAgentDir();
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					models: [
+						{ slug: "search", cpa_capabilities: { web_search: true } },
+						{ slug: "search", cpa_capabilities: { web_search: true } },
+						{ slug: "no", cpa_capabilities: { web_search: false } },
+						{ slug: "unknown" },
+						{ slug: "malformed", cpa_capabilities: { web_search: "true" } },
+						{ slug: "hidden", visibility: "hide", cpa_capabilities: { web_search: true } },
+						{ cpa_capabilities: { web_search: true } },
+					],
+				}),
+				{ status: 200 },
+			),
+		);
+		try {
+			const { loaded } = await resolveMappedModels(dir, "http://127.0.0.1:8317", "key");
+			expect(loaded.webSearchModelIds).toEqual(["search"]);
+			expect(loadModelsCache(dir, "http://127.0.0.1:8317")?.webSearchModelIds).toEqual(["search"]);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
 	it("returns null when the cache file is missing", () => {
 		const agentDir = tempAgentDir();
 		expect(loadModelsCache(agentDir, "http://127.0.0.1:8317")).toBeNull();
@@ -215,7 +253,7 @@ describe("models request timeout wiring", () => {
 			.mockResolvedValue(new Response(JSON.stringify({ models: [] }), { status: 200 }));
 
 		try {
-			await fetchCodexModels("http://127.0.0.1:8317/v1/models?client_version=pi", "key");
+			await fetchCodexModels("http://127.0.0.1:8317/v1/models?client_version=cpa", "key");
 			expect(timeoutSpy).toHaveBeenCalledWith(60_000);
 			const requestInit = fetchMock.mock.calls[0]?.[1];
 			expect(requestInit).toBeDefined();

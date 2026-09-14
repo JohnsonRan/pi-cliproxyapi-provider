@@ -230,7 +230,7 @@ describe("Fast catalog mapping", () => {
 				"custom-model",
 			]);
 			expect(fetchMock).toHaveBeenCalledWith(
-				"http://127.0.0.1:8317/v1/models?client_version=pi",
+				"http://127.0.0.1:8317/v1/models?client_version=cpa",
 				expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer test-key" }) }),
 			);
 		} finally {

@@ -25,7 +25,7 @@ Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex cl
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
 7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json`, refreshes it in the background on startup, and provides `/cliproxyapi-refresh` to force a refresh.
 8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
-9. After compaction, closes the reused Codex WebSocket for that session so CLIProxyAPI's server-side context resets with the compacted client messages.
+9. Leaves compaction triggering to Pi, including native checks between tool turns. After compaction, closes the reused Codex WebSocket for that session so CLIProxyAPI's server-side context resets with the compacted client messages. The extension does not inject synthetic context-overflow errors or block summary requests.
 
 ## Install
 
@@ -278,4 +278,4 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 - If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run `/login CLIProxyAPI` later after models become available.
 - If the selected model does not provide a non-empty `service_tiers` array: the request is left unchanged; `/fast` still updates the global preference and warns when enabling it.
 - If a gateway strips `X-Api-Key`: model discovery may still work, but inference fails because the `Authorization` header intentionally contains only the synthetic parser JWT.
-- After `/compact`, threshold compaction, or overflow recovery, the provider closes the reused Codex WebSocket for the current session. CLIProxyAPI binds server-side context to the connection, so a reused socket would keep reporting a near-full `cacheRead` and retrigger proactive compaction even though the client context is now small. SSE is unaffected because it bills from the request body.
+- After `/compact`, threshold compaction, or overflow recovery, the provider closes the reused Codex WebSocket for the current session. CLIProxyAPI binds server-side context to the connection, so a reused socket would keep reporting a near-full `cacheRead` and retrigger compaction even though the client context is now small. SSE is unaffected because it bills from the request body.

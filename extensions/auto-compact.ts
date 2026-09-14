@@ -1,16 +1,7 @@
-import {
-	type Api,
-	type AssistantMessage,
-	cleanupSessionResources,
-	createAssistantMessageEventStream,
-	type Model,
-} from "@earendil-works/pi-ai";
+import { cleanupSessionResources } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
-import type { CliproxyCodexStreamSimple } from "./codex-stream.ts";
 
-export const PROACTIVE_COMPACTION_ERROR_PREFIX = "context_length_exceeded: proactive compaction threshold reached";
-
-export interface ProactiveCompactionSettings {
+export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 }
@@ -32,64 +23,9 @@ export function resolveCompactionSessionId(source?: {
 	return undefined;
 }
 
-export function shouldScheduleProactiveCompaction(
-	message: AssistantMessage,
-	contextTokens: number,
-	contextWindow: number,
-	settings: ProactiveCompactionSettings,
-): boolean {
-	if (!settings.enabled || message.stopReason !== "toolUse") {
-		return false;
-	}
-	if (!message.content.some((block) => block.type === "toolCall")) {
-		return false;
-	}
-	if (!Number.isFinite(contextTokens) || contextTokens <= 0) {
-		return false;
-	}
-	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
-		return false;
-	}
-	if (!Number.isFinite(settings.reserveTokens) || settings.reserveTokens < 0) {
-		return false;
-	}
-
-	return contextTokens > contextWindow - settings.reserveTokens;
-}
-
-function createProactiveCompactionStream(model: Model<Api>, contextTokens: number, threshold: number) {
-	const stream = createAssistantMessageEventStream();
-	const output: AssistantMessage = {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "error",
-		errorMessage: `${PROACTIVE_COMPACTION_ERROR_PREFIX} (${contextTokens} > ${threshold})`,
-		timestamp: Date.now(),
-	};
-
-	queueMicrotask(() => {
-		stream.push({ type: "start", partial: output });
-		stream.push({ type: "error", reason: "error", error: output });
-		stream.end();
-	});
-
-	return stream;
-}
-
-export class ProactiveCompactionController {
+/** Pi owns compaction triggers; this controller only maintains settings and resources. */
+export class CompactionController {
 	private settingsManager: SettingsManager | undefined;
-	private pending: { modelKey: string; contextTokens: number; threshold: number } | undefined;
 
 	constructor(
 		private readonly agentDir: string,
@@ -102,25 +38,18 @@ export class ProactiveCompactionController {
 			this.settingsManager = SettingsManager.create(ctx.cwd, this.agentDir, {
 				projectTrusted: ctx.isProjectTrusted(),
 			});
-			this.pending = undefined;
 		});
 
 		pi.on("session_shutdown", () => {
 			this.settingsManager = undefined;
-			this.pending = undefined;
 			this.resetSessionResources();
 		});
 
 		pi.on("session_compact", (_event, ctx) => {
-			this.pending = undefined;
 			// CLIProxyAPI binds server-side Codex context to the WebSocket. Compaction
 			// only rewrites the client message list, so reuse would keep cacheRead high
-			// and retrigger proactive compaction on a now-small session.
+			// and retrigger compaction on a now-small session.
 			this.resetSessionResources(resolveCompactionSessionId(ctx));
-		});
-
-		pi.on("agent_settled", () => {
-			this.pending = undefined;
 		});
 
 		pi.on("turn_end", async (event, ctx) => {
@@ -132,43 +61,14 @@ export class ProactiveCompactionController {
 				return;
 			}
 
-			const settingsManager = this.settingsManager;
-			if (!settingsManager) {
-				return;
-			}
-			await settingsManager.reload();
-			const settings = settingsManager.getCompactionSettings();
-			const contextTokens = ctx.getContextUsage()?.tokens;
-			if (contextTokens === null || contextTokens === undefined) {
-				return;
-			}
-			if (!shouldScheduleProactiveCompaction(message, contextTokens, ctx.model.contextWindow, settings)) {
-				return;
-			}
-
-			this.pending = {
-				modelKey: this.modelKey(ctx.model),
-				contextTokens,
-				threshold: ctx.model.contextWindow - settings.reserveTokens,
-			};
+			// Refresh the footer's budget without intercepting the next request:
+			// Pi may already be sending a compaction summary on the same model.
+			await this.settingsManager?.reload();
 		});
 	}
 
-	getCompactionSettings(): ProactiveCompactionSettings | undefined {
+	getCompactionSettings(): CompactionSettings | undefined {
 		return this.settingsManager?.getCompactionSettings();
-	}
-
-	wrapStreamSimple(streamSimple: CliproxyCodexStreamSimple): CliproxyCodexStreamSimple {
-		return (model, context, options) => {
-			const pending = this.pending;
-			if (!pending || pending.modelKey !== this.modelKey(model)) {
-				return streamSimple(model, context, options);
-			}
-
-			this.pending = undefined;
-			this.resetSessionResources(options?.sessionId);
-			return createProactiveCompactionStream(model, pending.contextTokens, pending.threshold);
-		};
 	}
 
 	private resetSessionResources(sessionId?: string): void {
@@ -179,9 +79,5 @@ export class ProactiveCompactionController {
 			const scope = sessionId ? `session ${sessionId}` : "all sessions";
 			console.warn(`[pi-cliproxyapi-provider] failed to clean Pi resources for ${scope}: ${message}`);
 		}
-	}
-
-	private modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
-		return `${model.provider}/${model.id}`;
 	}
 }

@@ -1,5 +1,5 @@
 import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
-import type { ProactiveCompactionSettings } from "./auto-compact.ts";
+import type { CompactionSettings } from "./auto-compact.ts";
 import type { FastModeController } from "./fast.ts";
 import { type PauseController, pauseController } from "./pause.ts";
 
@@ -146,7 +146,7 @@ export class FastFooterController {
 	constructor(
 		private readonly providerId: string,
 		private readonly fastMode: FastModeController,
-		private readonly resolveCompactionSettings: () => ProactiveCompactionSettings | undefined = () => undefined,
+		private readonly resolveCompactionSettings: () => CompactionSettings | undefined = () => undefined,
 		private readonly pauseMode: PauseController = pauseController,
 	) {}
 

@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model, Provider } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
@@ -213,9 +214,9 @@ describe("Pi native provider compatibility", () => {
 				const result = await provider
 					.streamSimple(
 						model,
-						{
+						normalizeContext({
 							messages: [{ role: "user", content: "Summarize this.", timestamp: Date.now() }],
-						},
+						}),
 						{ apiKey: "test-key", cacheRetention, sessionId: "summary-session", transport: "sse" },
 					)
 					.result();

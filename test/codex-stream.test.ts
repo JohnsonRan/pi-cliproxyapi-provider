@@ -9,6 +9,7 @@ import {
 	type ToolResultMessage,
 	type UserMessage,
 } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CLIPROXYAPI_CODEX_API,
@@ -199,15 +200,11 @@ describe("Pi stock Codex streams", () => {
 			transport: "websocket",
 			getSessionHeaders: (options) => hierarchy.headers(options),
 		});
-		const result = await streams[method](
-			createModel(),
-			{ messages: [userMessage("hello")] },
-			{
-				apiKey: REAL_API_KEY,
-				sessionId: "child-id",
-				metadata: { parent_session_id: "parent-id" },
-			},
-		).result();
+		const result = await streams[method](createModel(), normalizeContext({ messages: [userMessage("hello")] }), {
+			apiKey: REAL_API_KEY,
+			sessionId: "child-id",
+			metadata: { parent_session_id: "parent-id" },
+		}).result();
 		expect(result.stopReason).toBe("stop");
 		const headers = toHeaders(FakeWebSocket.instances[0]?.options.headers);
 		expect(headers.get("session-id")).toBe("child-id");

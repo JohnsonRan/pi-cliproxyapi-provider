@@ -624,27 +624,27 @@ export async function fetchCodexModels(
 		throw new ModelsHttpError(response.status, response.statusText, body);
 	}
 
-	// Status 200 is enough for success, even when the catalog is empty or non-JSON.
+	// A 200 with no model list is not an empty catalog. CPA returns that when client templates fail to load.
 	let payload: unknown;
 	try {
 		payload = await response.json();
 	} catch {
-		return [];
+		throw new ModelsHttpError(response.status, "invalid JSON", "");
 	}
+	const models = catalogModels(payload);
+	if (!models) {
+		throw new ModelsHttpError(response.status, "missing model list", "");
+	}
+	return models;
+}
 
-	if (Array.isArray(payload)) {
-		return payload as CodexClientModel[];
-	}
-	if (payload && typeof payload === "object") {
-		const obj = payload as CodexClientModelsResponse;
-		if (Array.isArray(obj.models)) {
-			return obj.models;
-		}
-		if (Array.isArray(obj.data)) {
-			return obj.data;
-		}
-	}
-	return [];
+function catalogModels(payload: unknown): CodexClientModel[] | undefined {
+	if (Array.isArray(payload)) return payload as CodexClientModel[];
+	if (!payload || typeof payload !== "object") return undefined;
+	const obj = payload as CodexClientModelsResponse;
+	if (Array.isArray(obj.models)) return obj.models;
+	if (Array.isArray(obj.data)) return obj.data;
+	return undefined;
 }
 
 export interface ResolvedModelsResult {
@@ -995,7 +995,7 @@ export async function loadMappedModels(
 
 /**
  * Load mapped models from the matching cache, or fetch remotely and update the cache.
- * A forced refresh always bypasses the cache.
+ * A forced refresh always bypasses the cache. A successful catalog replaces it; a failed request does not.
  */
 export async function resolveMappedModels(
 	agentDir: string,
@@ -1013,11 +1013,9 @@ export async function resolveMappedModels(
 		(options.fastMode === undefined || (cache.fastMode ?? false) === options.fastMode) &&
 		(cache.useMaxContextWindow ?? false) === (options.useMaxContextWindow ?? false);
 
-	if (!options.forceRefresh) {
-		const cache = loadModelsCache(agentDir, baseUrlInput);
-		if (cache && cacheMatchesOptions(cache)) {
-			return { loaded: cache, fromCache: true };
-		}
+	const existingCache = loadModelsCache(agentDir, baseUrlInput);
+	if (!options.forceRefresh && existingCache && cacheMatchesOptions(existingCache)) {
+		return { loaded: existingCache, fromCache: true };
 	}
 
 	const loaded = await loadMappedModels(
@@ -1028,6 +1026,13 @@ export async function resolveMappedModels(
 		options.signal,
 		options.useMaxContextWindow,
 	);
+	// ponytail: empty 200 does not clobber a populated cache. Delete the cache file to accept a real empty catalog.
+	if (loaded.models.length === 0 && existingCache && existingCache.models.length > 0) {
+		console.warn(
+			`[pi-cliproxyapi-provider] ignored empty model catalog; keeping ${existingCache.models.length} cached models`,
+		);
+		return { loaded: existingCache, fromCache: true };
+	}
 	if (!options.signal?.aborted && (options.shouldCommit?.() ?? true)) {
 		saveModelsCache(agentDir, loaded);
 	}

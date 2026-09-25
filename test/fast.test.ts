@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -325,15 +326,11 @@ describe("Codex transport wrapper", () => {
 
 		const fullStreamModel = { ...model, api: CLIPROXYAPI_CODEX_API } as Model<typeof CLIPROXYAPI_CODEX_API>;
 		expect(
-			wrapped(
-				fullStreamModel,
-				{ messages: [] },
-				{
-					reasoningEffort: "high",
-					serviceTier: "default",
-					textVerbosity: "high",
-				},
-			),
+			wrapped(fullStreamModel, normalizeContext({ messages: [] }), {
+				reasoningEffort: "high",
+				serviceTier: "default",
+				textVerbosity: "high",
+			}),
 		).toBe(streamResult);
 		expect(captured).toMatchObject({
 			reasoningEffort: "high",

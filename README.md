@@ -246,14 +246,14 @@ The cache stores only model metadata and derived endpoint URLs — the model lis
 
 When the provider loads (including session resume):
 
-1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=cpa` then runs in the background; on success, the cache is rewritten and the registered model list is refreshed. If the query fails, the existing cache remains active.
+1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=cpa` then runs in the background. A non-empty catalog replaces the cache, so a removed model disappears immediately. An empty catalog, invalid JSON, or a body with no model list leaves the existing cache active. If the query fails, the existing cache also remains active.
 2. If no matching cache exists, the remote query runs synchronously. On success, the cache is written and the fetched models are registered. If it fails, startup logs a warning and no models are registered until the proxy responds.
 
 Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog. The provider also exposes Pi's native `refreshModels` lifecycle, so runtime-wide model refreshes use the same remote catalog and cache path.
 
 ### Refresh commands
 
-- `/cliproxyapi-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
+- `/cliproxyapi-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi. A non-empty catalog replaces the previous list. An empty catalog does not erase a populated cache; delete `cliproxyapi-models.json` if the proxy really has no models.
 - `/login CLIProxyAPI` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
 
 Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.

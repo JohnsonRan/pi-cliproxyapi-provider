@@ -363,6 +363,66 @@ describe("resolveMappedModels cache behavior", () => {
 		}
 	});
 
+	it("rejects a 200 that is not a model list", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch");
+		try {
+			fetchMock.mockResolvedValueOnce(new Response("not-json", { status: 200 }));
+			await expect(fetchCodexModels("http://127.0.0.1:8317/v1/models?client_version=cpa", "key")).rejects.toThrow(
+				/invalid JSON/,
+			);
+
+			fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ models: null }), { status: 200 }));
+			await expect(fetchCodexModels("http://127.0.0.1:8317/v1/models?client_version=cpa", "key")).rejects.toThrow(
+				/missing model list/,
+			);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it("does not replace a populated cache with an empty catalog", async () => {
+		const agentDir = tempAgentDir();
+		const cached = createMappedModels({ models: [createModel("kept")] });
+		saveModelsCache(agentDir, cached, 1);
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(new Response(JSON.stringify({ models: [] }), { status: 200 }));
+
+		try {
+			const result = await resolveMappedModels(agentDir, "http://127.0.0.1:8317", "key", { forceRefresh: true });
+			expect(result.fromCache).toBe(true);
+			expect(result.loaded.models.map((model) => model.id)).toEqual(["kept"]);
+			expect(loadModelsCache(agentDir, "http://127.0.0.1:8317")?.models.map((model) => model.id)).toEqual(["kept"]);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it("drops models missing from a successful refresh immediately", async () => {
+		const agentDir = tempAgentDir();
+		const cached = createMappedModels({
+			models: [createModel("kept"), createModel("gone")],
+			fastModelIds: ["gone"],
+		});
+		cached.webSearchModelIds = ["gone"];
+		saveModelsCache(agentDir, cached, 1);
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(
+				async () => new Response(JSON.stringify({ models: [createCodexModel("kept")] }), { status: 200 }),
+			);
+
+		try {
+			const result = await resolveMappedModels(agentDir, "http://127.0.0.1:8317", "key", { forceRefresh: true });
+			expect(result.loaded.models.map((model) => model.id)).toEqual(["kept"]);
+			expect(result.loaded.fastModelIds).not.toContain("gone");
+			expect(result.loaded.webSearchModelIds ?? []).not.toContain("gone");
+			expect(loadModelsCache(agentDir, "http://127.0.0.1:8317")?.models.map((model) => model.id)).toEqual(["kept"]);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
 	it("does not fall back when forceRefresh is requested and the remote call fails", async () => {
 		const agentDir = tempAgentDir();
 		const stale = createMappedModels({ models: [createModel("stale")] });
@@ -585,7 +645,7 @@ describe("/cliproxyapi-refresh command", () => {
 				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Refreshed 1 CLIProxyAPI models"), "info");
 
 				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
-				expect(diskCache?.models[0].id).toBe("refreshed");
+				expect(diskCache?.models.map((model) => model.id)).toEqual(["refreshed"]);
 				expect(diskCache?.fastModelIds).toEqual(["refreshed"]);
 			} finally {
 				fetchMock.mockRestore();

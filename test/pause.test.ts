@@ -53,6 +53,27 @@ describe("PauseController", () => {
 		expect(resolvePauseDefault(agentDir)).toBe(false);
 	});
 
+	it("shares pause state across Pi's per-extension module instances", async () => {
+		// Pi loads index.ts and tps.ts through separate jiti instances with moduleCache: false.
+		const loaderPath = new URL(
+			"../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/jiti-loader.js",
+			import.meta.url,
+		).href;
+		const { createJiti } = (await import(loaderPath)) as {
+			createJiti: (
+				url: string,
+				options: { moduleCache: boolean },
+			) => { import: (id: string) => Promise<{ pauseController: PauseController }> };
+		};
+		const pausePath = new URL("../extensions/pause.ts", import.meta.url).href;
+		const first = await createJiti(import.meta.url, { moduleCache: false }).import(pausePath);
+		const second = await createJiti(import.meta.url, { moduleCache: false }).import(pausePath);
+
+		first.pauseController.setEnabled(true);
+		expect(second.pauseController.isEnabled()).toBe(true);
+		first.pauseController.setEnabled(false);
+	});
+
 	it("keeps the current pause state when the config cannot be read", async () => {
 		vi.useFakeTimers();
 		const agentDir = tempAgentDir();

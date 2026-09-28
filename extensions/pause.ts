@@ -42,7 +42,12 @@ export class PauseController {
 	}
 }
 
-export const pauseController = new PauseController();
+// Pi loads each package extension (index.ts, tps.ts) with its own module cache,
+// so a plain module singleton would split pause state between them.
+const SHARED_PAUSE_CONTROLLER = Symbol.for("@router-for-me/pi-cliproxyapi-provider/pause-controller");
+const sharedScope = globalThis as Record<symbol, PauseController | undefined>;
+sharedScope[SHARED_PAUSE_CONTROLLER] ??= new PauseController();
+export const pauseController: PauseController = sharedScope[SHARED_PAUSE_CONTROLLER];
 
 function readPauseSetting(agentDir: string, fallback = false): boolean {
 	try {

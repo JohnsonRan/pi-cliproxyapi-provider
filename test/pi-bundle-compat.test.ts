@@ -176,9 +176,11 @@ describe(`Pi ${piVersion} bundled CLI compatibility`, () => {
 			const baseUrl = `http://127.0.0.1:${address.port}`;
 			writeFileSync(
 				join(agentDir, "cliproxyapi.json"),
-				JSON.stringify({ baseUrl, apiKey: "bundle-real-key", transport: "sse", webSearch }),
+				JSON.stringify({ baseUrl, apiKey: "bundle-real-key", webSearch }),
 				"utf8",
 			);
+			// Pi's own transport setting now controls CLIProxyAPI requests too.
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ transport: "sse" }), "utf8");
 			writeFileSync(
 				join(agentDir, "tmp", "models-dev-cache.json"),
 				JSON.stringify({ timestamp: Date.now(), providers: { test: { models: {} } } }),

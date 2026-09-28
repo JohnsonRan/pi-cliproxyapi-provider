@@ -5,7 +5,6 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 
 // Local shape matching pi ThinkingLevelMap; avoid hard runtime peer imports here.
 export type ThinkingLevelMap = Partial<
@@ -16,7 +15,6 @@ export const DEFAULT_PROVIDER_ID = "cliproxyapi";
 export const DEFAULT_PROVIDER_NAME = "CLIProxyAPI";
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 export const CONFIG_FILE_NAME = "cliproxyapi.json";
-export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
 export const AUTH_FILE_NAME = "auth.json";
 export const CLIENT_VERSION = "cpa";
 export const MODELS_REQUEST_TIMEOUT_MS = 60_000;
@@ -37,11 +35,8 @@ export interface CliproxyConfigFile {
 	fast?: boolean;
 	webSearch?: boolean;
 	pause?: boolean;
-	transport?: CliproxyTransport;
 	useMaxContextWindow?: boolean;
 }
-
-export type CliproxyTransport = "websocket" | "websocket-cached" | "auto" | "sse";
 
 export interface ResolvedIdentity {
 	providerId: string;
@@ -129,22 +124,22 @@ export interface PiProviderModel {
 	compat?: {
 		supportsOpenAIGrammarTools?: boolean;
 	};
+	/** CPA catalog capabilities; stored with the model so Pi's catalog store restores them offline. */
+	cpa?: CpaCapabilities;
+}
+
+export interface CpaCapabilities {
+	/** Non-empty `service_tiers`: priority processing is available. */
+	fast?: true;
+	/** Explicit `cpa_capabilities.web_search: true`. */
+	webSearch?: true;
+	/** `prefer_websockets: false` (non-Codex backends). */
+	sse?: true;
 }
 
 export interface MappedModels {
 	models: PiProviderModel[];
-	fastModelIds: string[];
-	/** Only explicit true capability claims; absent on older caches. */
-	webSearchModelIds?: string[];
-	/** Models CPA marks prefer_websockets=false (non-Codex backends); absent on older caches. */
-	sseModelIds?: string[];
 	modelsUrl: string;
-	fastMode?: boolean;
-	useMaxContextWindow?: boolean;
-}
-
-export interface ModelsCacheFile extends MappedModels {
-	fetchedAt: number;
 }
 
 interface ModelsDevCostPayload {
@@ -156,17 +151,10 @@ interface ModelsDevCostPayload {
 	context_over_200k?: unknown;
 }
 
-interface ModelsDevModePayload {
-	cost?: ModelsDevCostPayload;
-}
-
 interface ModelsDevModelPayload {
 	cost?: ModelsDevCostPayload;
 	limit?: {
 		output?: unknown;
-	};
-	experimental?: {
-		modes?: Record<string, ModelsDevModePayload | undefined>;
 	};
 }
 
@@ -174,17 +162,12 @@ export interface ModelsDevCostEntry {
 	providerId: string;
 	modelId: string;
 	standard: PiProviderCost;
-	fast?: PiProviderCost;
 	maxTokens?: number;
 }
 
 export interface ModelsDevCostCatalog {
 	exact: Map<string, ModelsDevCostEntry[]>;
 	normalized: Map<string, ModelsDevCostEntry[]>;
-}
-
-export interface OAuthRefreshMeta {
-	baseUrl: string;
 }
 
 export function firstNonEmpty(...values: Array<string | undefined | null>): string | undefined {
@@ -237,26 +220,6 @@ export function resolveEndpoints(baseUrlInput: string): {
 	return { inferenceBaseUrl, modelsUrl };
 }
 
-export function encodeRefreshMeta(baseUrl: string): string {
-	const meta: OAuthRefreshMeta = { baseUrl };
-	return JSON.stringify(meta);
-}
-
-export function decodeRefreshMeta(refresh: string | undefined): OAuthRefreshMeta | null {
-	if (!refresh?.trim()) {
-		return null;
-	}
-	try {
-		const parsed = JSON.parse(refresh) as OAuthRefreshMeta;
-		if (parsed && typeof parsed.baseUrl === "string" && parsed.baseUrl.trim()) {
-			return { baseUrl: parsed.baseUrl.trim() };
-		}
-	} catch {
-		// Older / non-JSON refresh tokens are ignored.
-	}
-	return null;
-}
-
 export function loadConfigFile(agentDir: string): CliproxyConfigFile {
 	const configPath = join(agentDir, CONFIG_FILE_NAME);
 	try {
@@ -301,52 +264,6 @@ export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): vo
 		...config,
 	};
 	writeFileAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
-}
-
-export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsCacheFile | null {
-	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
-	try {
-		const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<ModelsCacheFile>;
-		const endpoints = resolveEndpoints(baseUrlInput);
-		if (
-			typeof parsed.fetchedAt !== "number" ||
-			(parsed.modelsUrl !== endpoints.modelsUrl &&
-				parsed.modelsUrl !== endpoints.modelsUrl.replace("client_version=cpa", "client_version=pi")) ||
-			!Array.isArray(parsed.models) ||
-			!Array.isArray(parsed.fastModelIds)
-		) {
-			return null;
-		}
-		return parsed as ModelsCacheFile;
-	} catch {
-		return null;
-	}
-}
-
-export function saveModelsCache(agentDir: string, loaded: MappedModels, fetchedAt = Date.now()): void {
-	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
-	mkdirSync(dirname(cachePath), { recursive: true });
-	writeFileAtomic(cachePath, `${JSON.stringify({ ...loaded, fetchedAt }, null, 2)}\n`);
-}
-
-export function loadAuthConnection(agentDir: string, providerId: string): { baseUrl?: string; apiKey?: string } | null {
-	const entry = readStoredCredential(providerId, join(agentDir, AUTH_FILE_NAME));
-	if (entry?.type === "oauth" && typeof entry.access === "string" && entry.access.trim()) {
-		const meta = decodeRefreshMeta(typeof entry.refresh === "string" ? entry.refresh : undefined);
-		return {
-			apiKey: entry.access.trim(),
-			baseUrl: meta?.baseUrl,
-		};
-	}
-
-	if (entry?.type === "api_key" && typeof entry.key === "string" && entry.key.trim()) {
-		const baseUrl =
-			entry.env && typeof entry.env.CLIPROXYAPI_BASE_URL === "string"
-				? entry.env.CLIPROXYAPI_BASE_URL.trim() || undefined
-				: undefined;
-		return { apiKey: entry.key.trim(), baseUrl };
-	}
-	return null;
 }
 
 export function resolveIdentity(agentDir: string): ResolvedIdentity {
@@ -434,17 +351,6 @@ export function resolveUseMaxContextWindow(agentDir: string): boolean {
 	return value;
 }
 
-/**
- * Resolve an explicit Codex transport from env/config. Undefined means per-model:
- * persistent WebSocket, or SSE where the CPA catalog sets prefer_websockets=false.
- */
-export function resolveTransportSetting(agentDir: string): CliproxyTransport | undefined {
-	const value = firstNonEmpty(process.env.CLIPROXYAPI_TRANSPORT) ?? loadConfigFile(agentDir).transport;
-	if (value === undefined) return undefined;
-	if (value === "websocket" || value === "websocket-cached" || value === "auto" || value === "sse") return value;
-	throw new Error(`CLIProxyAPI transport must be one of: websocket, websocket-cached, auto, sse`);
-}
-
 /** Resolve the request pause preference from cliproxyapi.json, defaulting to false. */
 export function resolvePauseDefault(agentDir: string): boolean {
 	const file = loadConfigFile(agentDir);
@@ -468,35 +374,6 @@ export function resolveConnectionSources(sources: ConnectionSources): ResolvedCo
 	)!;
 	const apiKey = firstNonEmpty(sources.envApiKey, sources.credentialApiKey, sources.fileApiKey);
 	return apiKey ? { baseUrlInput, apiKey } : null;
-}
-
-/**
- * Resolve connection settings.
- * Priority: env > auth.json (/login) > cliproxyapi.json > default baseUrl.
- */
-export function resolveConnection(agentDir: string, providerId: string): ResolvedConnection | null {
-	let file: CliproxyConfigFile = {};
-	try {
-		file = loadConfigFile(agentDir);
-	} catch {
-		file = {};
-	}
-
-	let auth: { baseUrl?: string; apiKey?: string } | null = null;
-	try {
-		auth = loadAuthConnection(agentDir, providerId);
-	} catch {
-		auth = null;
-	}
-
-	return resolveConnectionSources({
-		envBaseUrl: process.env.CLIPROXYAPI_BASE_URL,
-		envApiKey: process.env.CLIPROXYAPI_API_KEY,
-		credentialBaseUrl: auth?.baseUrl,
-		credentialApiKey: auth?.apiKey,
-		fileBaseUrl: file.baseUrl,
-		fileApiKey: file.apiKey,
-	});
 }
 
 export function extractReasoningEfforts(model: CodexClientModel): string[] {
@@ -555,10 +432,17 @@ export function supportsFastServiceTier(model: CodexClientModel): boolean {
 	return Array.isArray(model.service_tiers) && model.service_tiers.length > 0;
 }
 
+function cpaCapabilities(model: CodexClientModel): CpaCapabilities | undefined {
+	const cpa: CpaCapabilities = {};
+	if (supportsFastServiceTier(model)) cpa.fast = true;
+	if (model.cpa_capabilities?.web_search === true) cpa.webSearch = true;
+	if (model.prefer_websockets === false) cpa.sse = true;
+	return Object.keys(cpa).length > 0 ? cpa : undefined;
+}
+
 export function toPiModel(
 	model: CodexClientModel,
 	costCatalog?: ModelsDevCostCatalog,
-	fastMode = false,
 	useMaxContextWindow = false,
 ): PiProviderModel | null {
 	const id = codexModelId(model);
@@ -590,10 +474,9 @@ export function toPiModel(
 			: undefined) ??
 		(costCatalog ? matchModelMaxTokens(id, costCatalog) : undefined) ??
 		DEFAULT_MAX_TOKENS;
-	const cost = costCatalog
-		? matchModelCost(id, costCatalog, fastMode && supportsFastServiceTier(model))
-		: { ...ZERO_COST };
+	const cost = costCatalog ? matchModelCost(id, costCatalog) : { ...ZERO_COST };
 	const compat = model.apply_patch_tool_type === "freeform" ? { supportsOpenAIGrammarTools: true } : undefined;
+	const cpa = cpaCapabilities(model);
 
 	return {
 		id,
@@ -605,6 +488,7 @@ export function toPiModel(
 		maxTokens,
 		thinkingLevelMap: buildThinkingLevelMap(efforts),
 		...(compat ? { compat } : {}),
+		...(cpa ? { cpa } : {}),
 	};
 }
 
@@ -668,11 +552,6 @@ function catalogModels(payload: unknown): CodexClientModel[] | undefined {
 	if (Array.isArray(obj.models)) return obj.models;
 	if (Array.isArray(obj.data)) return obj.data;
 	return undefined;
-}
-
-export interface ResolvedModelsResult {
-	loaded: MappedModels;
-	fromCache: boolean;
 }
 
 const MODEL_NAMESPACE_PREFIX =
@@ -814,9 +693,7 @@ function addModelsDevEntry(catalog: ModelsDevCostCatalog, entry: ModelsDevCostEn
 
 function sameCostVariants(entries: ModelsDevCostEntry[]): boolean {
 	const fingerprints = new Set(
-		entries.map((entry) =>
-			JSON.stringify({ standard: entry.standard, fast: entry.fast, maxTokens: entry.maxTokens }),
-		),
+		entries.map((entry) => JSON.stringify({ standard: entry.standard, maxTokens: entry.maxTokens })),
 	);
 	return fingerprints.size === 1;
 }
@@ -912,8 +789,7 @@ function buildCatalogFromProviders(providers: Record<string, unknown>): ModelsDe
 			const outputLimit = finiteNumber(model?.limit?.output);
 			const maxTokens = outputLimit !== undefined && outputLimit > 0 ? Math.floor(outputLimit) : undefined;
 			if (!standard && maxTokens === undefined) continue;
-			const fast = parseModelsDevCost(model?.experimental?.modes?.fast?.cost);
-			addModelsDevEntry(catalog, { providerId, modelId, standard: standard ?? { ...ZERO_COST }, fast, maxTokens });
+			addModelsDevEntry(catalog, { providerId, modelId, standard: standard ?? { ...ZERO_COST }, maxTokens });
 		}
 	}
 	return catalog;
@@ -956,116 +832,31 @@ export async function fetchModelsDevCostMap(
 	return { exact: new Map(), normalized: new Map() };
 }
 
-export function matchModelCost(modelId: string, costCatalog: ModelsDevCostCatalog, isFastMode = false): PiProviderCost {
+export function matchModelCost(modelId: string, costCatalog: ModelsDevCostCatalog): PiProviderCost {
 	const entry = findModelsDevEntry(modelId, costCatalog);
-	if (!entry) return { ...ZERO_COST };
-	return cloneCost(isFastMode && entry.fast ? entry.fast : entry.standard);
+	return entry ? cloneCost(entry.standard) : { ...ZERO_COST };
 }
 
 export function matchModelMaxTokens(modelId: string, costCatalog: ModelsDevCostCatalog): number | undefined {
 	return findModelsDevEntry(modelId, costCatalog)?.maxTokens;
 }
 
+/** Fetch and map the CPA catalog. Pricing (models.dev) is resolved only when agentDir is given. */
 export async function loadMappedModels(
 	baseUrlInput: string,
 	apiKey: string,
-	timeoutOrFastMode: number | boolean = MODELS_REQUEST_TIMEOUT_MS,
-	agentDir?: string,
-	signal?: AbortSignal,
-	useMaxContextWindow = false,
+	options: { agentDir?: string; signal?: AbortSignal; useMaxContextWindow?: boolean } = {},
 ): Promise<MappedModels> {
-	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
-	const effectiveFastMode = typeof timeoutOrFastMode === "boolean" ? timeoutOrFastMode : false;
-	const timeoutMs = typeof timeoutOrFastMode === "number" ? timeoutOrFastMode : MODELS_REQUEST_TIMEOUT_MS;
 	const endpoints = resolveEndpoints(baseUrlInput);
 	const [remoteModels, costCatalog] = await Promise.all([
-		fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs, signal),
-		pricingEnabled ? fetchModelsDevCostMap(agentDir, false, signal) : Promise.resolve(undefined),
+		fetchCodexModels(endpoints.modelsUrl, apiKey, MODELS_REQUEST_TIMEOUT_MS, options.signal),
+		options.agentDir ? fetchModelsDevCostMap(options.agentDir, false, options.signal) : Promise.resolve(undefined),
 	]);
-	const models = remoteModels
-		.map((model) => toPiModel(model, costCatalog, effectiveFastMode, useMaxContextWindow))
-		.filter((model): model is PiProviderModel => model !== null);
-	const fastModelIds = Array.from(
-		new Set(
-			remoteModels
-				.filter(supportsFastServiceTier)
-				.map(codexModelId)
-				.filter((modelId) => modelId.length > 0),
-		),
-	);
-
 	// Empty catalog is valid: credentials passed (HTTP 200), just no usable models yet.
 	return {
-		models,
-		fastModelIds,
-		webSearchModelIds: Array.from(
-			new Set(
-				remoteModels
-					.filter(
-						(model) =>
-							model.cpa_capabilities?.web_search === true &&
-							String(model.visibility ?? "").toLowerCase() !== "hide",
-					)
-					.map(codexModelId)
-					.filter(Boolean),
-			),
-		),
-		sseModelIds: Array.from(
-			new Set(
-				remoteModels
-					.filter((model) => model.prefer_websockets === false)
-					.map(codexModelId)
-					.filter(Boolean),
-			),
-		),
+		models: remoteModels
+			.map((model) => toPiModel(model, costCatalog, options.useMaxContextWindow))
+			.filter((model): model is PiProviderModel => model !== null),
 		modelsUrl: endpoints.modelsUrl,
-		...(pricingEnabled ? { fastMode: effectiveFastMode } : {}),
-		useMaxContextWindow,
 	};
-}
-
-/**
- * Load mapped models from the matching cache, or fetch remotely and update the cache.
- * A forced refresh always bypasses the cache. A successful catalog replaces it; a failed request does not.
- */
-export async function resolveMappedModels(
-	agentDir: string,
-	baseUrlInput: string,
-	apiKey: string,
-	options: {
-		forceRefresh?: boolean;
-		fastMode?: boolean;
-		signal?: AbortSignal;
-		shouldCommit?: () => boolean;
-		useMaxContextWindow?: boolean;
-	} = {},
-): Promise<ResolvedModelsResult> {
-	const cacheMatchesOptions = (cache: ModelsCacheFile): boolean =>
-		(options.fastMode === undefined || (cache.fastMode ?? false) === options.fastMode) &&
-		(cache.useMaxContextWindow ?? false) === (options.useMaxContextWindow ?? false);
-
-	const existingCache = loadModelsCache(agentDir, baseUrlInput);
-	if (!options.forceRefresh && existingCache && cacheMatchesOptions(existingCache)) {
-		return { loaded: existingCache, fromCache: true };
-	}
-
-	const loaded = await loadMappedModels(
-		baseUrlInput,
-		apiKey,
-		options.fastMode,
-		agentDir,
-		options.signal,
-		options.useMaxContextWindow,
-	);
-	// ponytail: empty 200 does not clobber a populated cache. Delete the cache file to accept a real empty catalog.
-	if (loaded.models.length === 0 && existingCache && existingCache.models.length > 0) {
-		console.warn(
-			`[pi-cliproxyapi-provider] ignored empty model catalog; keeping ${existingCache.models.length} cached models`,
-		);
-		return { loaded: existingCache, fromCache: true };
-	}
-	if (!options.signal?.aborted && (options.shouldCommit?.() ?? true)) {
-		saveModelsCache(agentDir, loaded);
-	}
-	return { loaded, fromCache: false };
 }

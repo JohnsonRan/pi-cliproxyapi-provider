@@ -8,19 +8,20 @@
  */
 
 import { createHash } from "node:crypto";
-import type {
-	Api,
-	AssistantMessageEventStream,
-	Context,
-	Model,
-	Provider,
-	ProviderHeaders,
-	ProviderStreamOptions,
-	SimpleStreamOptions,
-	StreamOptions,
+import {
+	type Api,
+	type AssistantMessageEventStream,
+	type Context,
+	clampThinkingLevel,
+	type Model,
+	type OpenAICodexResponsesOptions,
+	type Provider,
+	type ProviderHeaders,
+	type ProviderStreamOptions,
+	type SimpleStreamOptions,
+	type StreamOptions,
 } from "@earendil-works/pi-ai";
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
-import type { CliproxyTransport } from "./lib.ts";
 import { mergeSessionHeaders } from "./session.ts";
 
 export const CLIPROXYAPI_CODEX_API = "openai-codex-responses" as const;
@@ -46,15 +47,14 @@ export type CliproxyCodexStreams = {
 export interface CliproxyCodexStreamOptions {
 	shouldUseFast?: (model: Model<Api>) => boolean;
 	getSessionHeaders?: (options?: StreamOptions) => ProviderHeaders;
-	/** Explicit user transport; overrides the per-model catalog preference. */
-	transport?: CliproxyTransport;
 	/** Catalog says prefer_websockets=false for this model. */
 	prefersSse?: (model: Model<Api>) => boolean;
 }
 
-type TransportChoice = CliproxyTransport | ((model: Model<Api>) => CliproxyTransport);
+type Transport = NonNullable<StreamOptions["transport"]>;
+type TransportChoice = (model: Model<Api>, options?: StreamOptions) => Transport;
 
-type PayloadHook = NonNullable<SimpleStreamOptions["onPayload"]>;
+export const PRIORITY_SERVICE_TIER = "priority" as const;
 
 function encodeJwtPart(value: unknown): string {
 	return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
@@ -90,25 +90,30 @@ export function withCliproxyCodexAuth<TOptions extends StreamOptions>(options?: 
 	} as unknown as TOptions;
 }
 
-export function withPriorityServiceTier(payload: unknown): unknown {
-	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-		return payload;
-	}
-	return {
-		...(payload as Record<string, unknown>),
-		service_tier: "priority",
-	};
+/**
+ * Pi's global `transport` setting wins unless it is the default `auto`; then the
+ * CPA catalog decides (persistent WebSocket, or SSE for prefer_websockets=false).
+ * One-off no-cache requests always use SSE.
+ */
+export function resolveCliproxyTransport(options: StreamOptions | undefined, prefersSse: boolean): Transport {
+	if (options?.cacheRetention === "none") return "sse";
+	if (options?.transport && options.transport !== "auto") return options.transport;
+	return prefersSse ? "sse" : "websocket";
 }
 
-/** Apply Fast before Pi's shared payload hooks so later extensions retain final control. */
-export async function applyFastPayloadHook(
-	payload: unknown,
-	model: Model<Api>,
-	onPayload?: PayloadHook,
-): Promise<unknown> {
-	const fastPayload = withPriorityServiceTier(payload);
-	const nextPayload = await onPayload?.(fastPayload, model);
-	return nextPayload === undefined ? fastPayload : nextPayload;
+/**
+ * Pi's stock Codex streamSimple drops `serviceTier`, so Fast maps simple options onto the
+ * full stream the same way (the Codex stream ignores maxTokens/samplingParams, so the rest
+ * passes through). The stock stream then sends `service_tier` and applies Codex tier pricing.
+ */
+export function toFastCodexOptions(model: Model<Api>, options?: SimpleStreamOptions): OpenAICodexResponsesOptions {
+	const { reasoning, ...rest } = options ?? {};
+	const level = reasoning ? clampThinkingLevel(model, reasoning) : undefined;
+	return {
+		...rest,
+		reasoningEffort: (level === "off" ? undefined : level) as OpenAICodexResponsesOptions["reasoningEffort"],
+		serviceTier: PRIORITY_SERVICE_TIER,
+	};
 }
 
 function wrapStreamForCliproxyAuth<TOptions extends StreamOptions>(
@@ -132,15 +137,7 @@ function wrapStreamForTransport<TOptions extends StreamOptions>(
 	transport: TransportChoice,
 ): CliproxyCodexStreamFunction<TOptions> {
 	return (model, context, streamOptions) =>
-		stream(model, context, {
-			...streamOptions,
-			transport:
-				streamOptions?.cacheRetention === "none"
-					? "sse"
-					: typeof transport === "function"
-						? transport(model)
-						: transport,
-		} as TOptions);
+		stream(model, context, { ...streamOptions, transport: transport(model, streamOptions) } as TOptions);
 }
 
 export function wrapStreamSimpleForTransport(
@@ -157,38 +154,6 @@ export function wrapCodexStreamForTransport(
 	return wrapStreamForTransport(
 		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
 		transport,
-	) as CliproxyCodexStream;
-}
-
-function wrapStreamForFast<TOptions extends StreamOptions>(
-	stream: CliproxyCodexStreamFunction<TOptions>,
-	shouldUseFast?: (model: Model<Api>) => boolean,
-): CliproxyCodexStreamFunction<TOptions> {
-	return (model, context, streamOptions) => {
-		if (!shouldUseFast?.(model)) {
-			return stream(model, context, streamOptions);
-		}
-		return stream(model, context, {
-			...streamOptions,
-			onPayload: (payload, payloadModel) => applyFastPayloadHook(payload, payloadModel, streamOptions?.onPayload),
-		} as TOptions);
-	};
-}
-
-export function wrapStreamSimpleForFast(
-	streamSimple: CliproxyCodexStreamSimple,
-	shouldUseFast?: (model: Model<Api>) => boolean,
-): CliproxyCodexStreamSimple {
-	return wrapStreamForFast(streamSimple, shouldUseFast);
-}
-
-export function wrapCodexStreamForFast(
-	stream: CliproxyCodexStream,
-	shouldUseFast?: (model: Model<Api>) => boolean,
-): CliproxyCodexStream {
-	return wrapStreamForFast(
-		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
-		shouldUseFast,
 	) as CliproxyCodexStream;
 }
 
@@ -213,8 +178,9 @@ function wrapStreamForSession<TOptions extends StreamOptions>(
 
 export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {}): CliproxyCodexStreams {
 	const stock = openAICodexResponsesApi();
-	const transport: TransportChoice =
-		options.transport ?? ((model) => (options.prefersSse?.(model) ? "sse" : "websocket"));
+	const transport: TransportChoice = (model, streamOptions) =>
+		resolveCliproxyTransport(streamOptions, options.prefersSse?.(model) ?? false);
+	const useFast = (model: Model<Api>): boolean => options.shouldUseFast?.(model) ?? false;
 	const stockStreamSimple = wrapStreamForSession(
 		stock.streamSimple as CliproxyCodexStreamSimple,
 		options.getSessionHeaders,
@@ -223,18 +189,23 @@ export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {
 		stock.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
 		options.getSessionHeaders,
 	) as CliproxyCodexStream;
-	const streamSimple = wrapStreamSimpleForFast(
-		wrapStreamSimpleForTransport(wrapStreamSimpleForCliproxyAuth(stockStreamSimple), transport),
-		options.shouldUseFast,
-	);
-	const stream = wrapCodexStreamForFast(
-		wrapCodexStreamForTransport(wrapCodexStreamForCliproxyAuth(stockStream), transport),
-		options.shouldUseFast,
-	);
+	const simple = wrapStreamSimpleForTransport(wrapStreamSimpleForCliproxyAuth(stockStreamSimple), transport);
+	const full = wrapCodexStreamForTransport(wrapCodexStreamForCliproxyAuth(stockStream), transport);
+	const fullStream = full as CliproxyCodexStreamFunction<OpenAICodexResponsesOptions>;
 
 	return {
 		api: CLIPROXYAPI_CODEX_API,
-		streamSimple,
-		stream,
+		streamSimple: (model, context, streamOptions) =>
+			useFast(model)
+				? fullStream(model, context, toFastCodexOptions(model, streamOptions))
+				: simple(model, context, streamOptions),
+		stream: ((model, context, streamOptions) =>
+			fullStream(
+				model,
+				context,
+				useFast(model)
+					? { ...streamOptions, serviceTier: streamOptions?.serviceTier ?? PRIORITY_SERVICE_TIER }
+					: streamOptions,
+			)) as CliproxyCodexStream,
 	};
 }

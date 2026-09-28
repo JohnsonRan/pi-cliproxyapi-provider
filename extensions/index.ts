@@ -7,7 +7,10 @@
  * 3. Final login step validates credentials via /v1/models?client_version=cpa
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
  * 4. Pi stores the API key and base URL together in auth.json.
- * 5. `/fast` globally controls catalog-driven priority service tier injection.
+ * 5. `/fast` globally requests the priority service tier for catalog-supported models.
+ *
+ * The model catalog follows Pi's native provider lifecycle: Pi restores the stored
+ * catalog offline, refreshes it from the network, and persists what we publish.
  *
  * Uses Pi's stock openai-codex-responses implementation. Inference adapts the
  * plain CPA key into X-Api-Key plus a non-secret synthetic Codex JWT.
@@ -15,15 +18,14 @@
  * Non-interactive setup still works via env vars or ~/.pi/agent/cliproxyapi.json.
  */
 
-import type {
-	Api,
-	ApiKeyCredential,
-	AuthInteraction,
-	Model,
-	Provider,
-	RefreshModelsContext,
-} from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import type { Api, ApiKeyCredential, AuthInteraction, Model, Provider } from "@earendil-works/pi-ai";
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+	readStoredCredential,
+} from "@earendil-works/pi-coding-agent";
 import { CompactionController } from "./auto-compact.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
@@ -33,22 +35,21 @@ import {
 } from "./codex-stream.ts";
 import { FastModeController } from "./fast.ts";
 import {
+	AUTH_FILE_NAME,
 	CONFIG_FILE_NAME,
+	type CpaCapabilities,
 	DEFAULT_BASE_URL,
+	fetchCodexModels,
 	firstNonEmpty,
-	isUnauthorizedModelsError,
-	loadAuthConnection,
 	loadConfigFile,
-	type MappedModels,
+	loadMappedModels,
+	MODELS_REQUEST_TIMEOUT_MS,
 	type PiProviderModel,
-	resolveConnection,
 	resolveConnectionSources,
 	resolveEndpoints,
 	resolveFastDefault,
 	resolveIdentity,
-	resolveMappedModels,
 	resolvePauseDefault,
-	resolveTransportSetting,
 	resolveUseMaxContextWindow,
 	resolveWebSearchDefault,
 	saveConfigFile,
@@ -60,27 +61,10 @@ import { registerNativeSearch } from "./search.ts";
 import { SessionHierarchy } from "./session.ts";
 import { ProviderStatusController } from "./status.ts";
 
-interface RefreshResult {
-	modelCount: number;
-	modelsUrl: string;
-}
-
-class ModelRefreshCoordinator {
-	private generation = 0;
-	private activeController: AbortController | undefined;
-
-	begin(): { generation: number; signal: AbortSignal } {
-		this.activeController?.abort();
-		const controller = new AbortController();
-		this.activeController = controller;
-		this.generation += 1;
-		return { generation: this.generation, signal: controller.signal };
-	}
-
-	isCurrent(generation: number): boolean {
-		return this.generation === generation;
-	}
-}
+/** Bound on the startup catalog fetch; Pi waits for the extension factory. */
+export const STARTUP_CATALOG_TIMEOUT_MS = 5_000;
+/** A network refresh this soon after the startup fetch reuses its result. */
+const STARTUP_CATALOG_REUSE_MS = 60_000;
 
 function logWarn(message: string): void {
 	console.warn(`[pi-cliproxyapi-provider] ${message}`);
@@ -98,21 +82,18 @@ interface ModelCapabilities {
 	changed?: () => void;
 }
 
-function replaceIds(target: Set<string>, ids: string[] | undefined): void {
-	target.clear();
-	for (const id of ids ?? []) {
-		if (typeof id === "string" && id.trim()) target.add(id.trim());
-	}
+function capabilityIds(models: readonly Model<Api>[], key: keyof CpaCapabilities): string[] {
+	return models.filter((model) => (model as { cpa?: CpaCapabilities }).cpa?.[key] === true).map((model) => model.id);
 }
 
 function setModelCapabilities(
 	fastMode: FastModeController,
 	capabilities: ModelCapabilities,
-	loaded: MappedModels,
+	models: readonly Model<Api>[],
 ): void {
-	fastMode.setSupportedModelIds(loaded.fastModelIds);
-	replaceIds(capabilities.webSearch, loaded.webSearchModelIds);
-	replaceIds(capabilities.sse, loaded.sseModelIds);
+	fastMode.setSupportedModelIds(capabilityIds(models, "fast"));
+	capabilities.webSearch = new Set(capabilityIds(models, "webSearch"));
+	capabilities.sse = new Set(capabilityIds(models, "sse"));
 	capabilities.changed?.();
 }
 
@@ -126,23 +107,21 @@ function useMaxContextWindow(agentDir: string): boolean {
 	}
 }
 
+/** Default for the /login prompt and the provider endpoint: env > stored login > config > default. */
 function resolveDefaultBaseUrl(agentDir: string, providerId: string): string {
 	let fileBaseUrl: string | undefined;
 	try {
 		fileBaseUrl = loadConfigFile(agentDir).baseUrl;
 	} catch (error) {
-		const err = error as NodeJS.ErrnoException;
-		if (err.code !== "ENOENT") {
-			logWarn(`failed to read ${CONFIG_FILE_NAME}: ${err.message}`);
-		}
+		logWarn(`failed to read ${CONFIG_FILE_NAME}: ${(error as Error).message}`);
 	}
 
 	let authBaseUrl: string | undefined;
 	try {
-		authBaseUrl = loadAuthConnection(agentDir, providerId)?.baseUrl;
+		const credential = readStoredCredential(providerId, join(agentDir, AUTH_FILE_NAME));
+		authBaseUrl = credential?.type === "api_key" ? credential.env?.CLIPROXYAPI_BASE_URL : undefined;
 	} catch (error) {
-		const err = error as Error;
-		logWarn(`failed to read auth.json: ${err.message}`);
+		logWarn(`failed to read ${AUTH_FILE_NAME}: ${(error as Error).message}`);
 	}
 
 	return firstNonEmpty(process.env.CLIPROXYAPI_BASE_URL, authBaseUrl, fileBaseUrl, DEFAULT_BASE_URL)!;
@@ -153,39 +132,30 @@ function registerProvider(
 	options: {
 		providerId: string;
 		providerName: string;
-		baseUrlInput: string;
-		models?: PiProviderModel[];
 		agentDir: string;
 		stream: CliproxyCodexStream;
 		streamSimple: CliproxyCodexStreamSimple;
 		fastMode: FastModeController;
 		capabilities: ModelCapabilities;
-		refreshCoordinator: ModelRefreshCoordinator;
 	},
-): void {
-	const {
-		providerId,
-		providerName,
-		baseUrlInput,
-		models,
-		agentDir,
-		stream,
-		streamSimple,
-		fastMode,
-		capabilities,
-		refreshCoordinator,
-	} = options;
-	const inferenceBaseUrl = resolveEndpoints(baseUrlInput).inferenceBaseUrl;
-	const api: Api = CLIPROXYAPI_CODEX_API;
+): { loadStartupCatalog: () => Promise<void> } {
+	const { providerId, providerName, agentDir, stream, streamSimple, fastMode, capabilities } = options;
+	const baseUrlInput = resolveDefaultBaseUrl(agentDir, providerId);
 	const bindModels = (entries: PiProviderModel[], inferenceBaseUrl: string): Model<Api>[] =>
 		entries.map((model) => ({
 			...model,
 			provider: providerId,
-			api,
+			api: CLIPROXYAPI_CODEX_API,
 			baseUrl: inferenceBaseUrl,
 		}));
-	let currentModels = bindModels(models ?? [], inferenceBaseUrl);
+	let currentModels: readonly Model<Api>[] = [];
+	const setModels = (models: readonly Model<Api>[]): void => {
+		currentModels = models;
+		setModelCapabilities(fastMode, capabilities, models);
+	};
 	let pendingConfigCleanup: ApiKeyCredential | undefined;
+	/** Catalog fetched while the factory ran, before Pi's first refresh. */
+	let startup: { baseUrl: string; models: Model<Api>[]; at: number } | undefined;
 
 	const credentialConnection = (credential?: ApiKeyCredential) => {
 		let file = {} as ReturnType<typeof loadConfigFile>;
@@ -219,6 +189,7 @@ function registerProvider(
 		}
 	};
 
+	/** Validation only: Pi refreshes the catalog through refreshModels after storing the credential. */
 	const login = async (interaction: AuthInteraction): Promise<ApiKeyCredential> => {
 		let defaultBaseUrl = resolveDefaultBaseUrl(agentDir, providerId);
 		while (true) {
@@ -234,8 +205,9 @@ function registerProvider(
 				}),
 				defaultBaseUrl,
 			)!;
+			let modelsUrl: string;
 			try {
-				resolveEndpoints(baseUrl);
+				modelsUrl = resolveEndpoints(baseUrl).modelsUrl;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				interaction.notify({ type: "info", message: `Invalid base URL (${message}). Please re-enter it.` });
@@ -248,27 +220,14 @@ function registerProvider(
 
 			interaction.notify({ type: "progress", message: "Validating credentials via models endpoint..." });
 			try {
-				const refresh = refreshCoordinator.begin();
-				const signal = interaction.signal ? AbortSignal.any([interaction.signal, refresh.signal]) : refresh.signal;
-				const { loaded } = await resolveMappedModels(agentDir, baseUrl, apiKey, {
-					forceRefresh: true,
-					fastMode: fastMode.isEnabled(),
-					useMaxContextWindow: useMaxContextWindow(agentDir),
-					signal,
-					shouldCommit: () => refreshCoordinator.isCurrent(refresh.generation),
-				});
-				if (!refreshCoordinator.isCurrent(refresh.generation)) {
-					throw new Error("Model refresh was superseded by a newer request.");
-				}
-				currentModels = bindModels(loaded.models, resolveEndpoints(baseUrl).inferenceBaseUrl);
-				setModelCapabilities(fastMode, capabilities, loaded);
+				const models = await fetchCodexModels(modelsUrl, apiKey, MODELS_REQUEST_TIMEOUT_MS, interaction.signal);
 				const credential: ApiKeyCredential = {
 					type: "api_key",
 					key: apiKey,
 					env: { CLIPROXYAPI_BASE_URL: baseUrl },
 				};
 				pendingConfigCleanup = credential;
-				logInfo(`login ok: registered ${loaded.models.length} models from ${loaded.modelsUrl}`);
+				logInfo(`login ok: ${models.length} catalog entries at ${modelsUrl}`);
 				return credential;
 			} catch (error) {
 				if (interaction.signal?.aborted) throw error;
@@ -286,7 +245,7 @@ function registerProvider(
 	const provider: Provider = {
 		id: providerId,
 		name: providerName,
-		baseUrl: inferenceBaseUrl,
+		baseUrl: resolveEndpoints(baseUrlInput).inferenceBaseUrl,
 		auth: {
 			apiKey: {
 				name: `${providerName} API key`,
@@ -323,40 +282,83 @@ function registerProvider(
 			},
 		},
 		getModels: () => currentModels,
-		refreshModels: async (context: RefreshModelsContext) => {
+		refreshModels: async (context) => {
 			const credential = context.credential?.type === "api_key" ? context.credential : undefined;
 			cleanupMigratedConfigCredentials(credential);
-			if (!context.allowNetwork) return;
-			const connection = credentialConnection(
-				context.credential?.type === "api_key" ? context.credential : undefined,
-			);
+			const connection = credentialConnection(credential);
 			if (!connection) return;
-			const refresh = refreshCoordinator.begin();
-			const signal = AbortSignal.any([context.signal, refresh.signal]);
-			const { loaded } = await resolveMappedModels(agentDir, connection.baseUrl, connection.apiKey, {
-				forceRefresh: true,
-				fastMode: fastMode.isEnabled(),
+			const inferenceBaseUrl = resolveEndpoints(connection.baseUrl).inferenceBaseUrl;
+			const stored = (context.stored?.models ?? []).filter(
+				(model) => model.provider === providerId && model.baseUrl === inferenceBaseUrl,
+			);
+			const fresh = startup?.baseUrl === inferenceBaseUrl ? startup : undefined;
+			const publish = async (models: Model<Api>[]): Promise<void> => {
+				// ponytail: an empty 200 never clobbers a populated catalog. Delete this provider's
+				// models-store.json entry to accept a proxy that really has no models.
+				if (models.length === 0 && stored.length > 0) {
+					logWarn(`ignored empty model catalog; keeping ${stored.length} stored models`);
+					return;
+				}
+				await context.publish({ persist: { models, checkedAt: Date.now() }, update: () => setModels(models) });
+			};
+
+			if (!context.allowNetwork) {
+				// Offline phase: prefer this process's startup fetch, else Pi's stored catalog for this proxy.
+				if (fresh) await publish(fresh.models);
+				else await context.publish({ update: () => setModels(stored) });
+				return;
+			}
+			// The first network phase consumes the startup fetch; afterwards Pi's store is current.
+			startup = undefined;
+			if (fresh && !context.force && Date.now() - fresh.at < STARTUP_CATALOG_REUSE_MS) {
+				await publish(fresh.models);
+				return;
+			}
+			const loaded = await loadMappedModels(connection.baseUrl, connection.apiKey, {
+				agentDir,
+				signal: context.signal,
 				useMaxContextWindow: useMaxContextWindow(agentDir),
-				signal,
-				shouldCommit: () => refreshCoordinator.isCurrent(refresh.generation),
 			});
-			if (signal.aborted || !refreshCoordinator.isCurrent(refresh.generation)) return;
-			const nextModels = bindModels(loaded.models, resolveEndpoints(connection.baseUrl).inferenceBaseUrl);
-			// Pi >=0.84 guards provider state by generation; mutate only inside publish().
-			await context.publish({
-				update: () => {
-					if (!refreshCoordinator.isCurrent(refresh.generation)) return;
-					currentModels = nextModels;
-					setModelCapabilities(fastMode, capabilities, loaded);
-				},
-			});
+			if (context.signal.aborted) return;
+			await publish(bindModels(loaded.models, inferenceBaseUrl));
 		},
 		stream,
 		streamSimple,
 	};
 
-	pi.unregisterProvider(providerId);
 	pi.registerProvider(provider);
+
+	/**
+	 * Pi resolves `--model` right after its startup refreshes, which never go online in print/JSON
+	 * mode and can supersede each other. The factory is the one step Pi reliably awaits, so fetch
+	 * the catalog here (bounded) and hand it to refreshModels instead of racing Pi's refreshes.
+	 * On failure, refreshModels falls back to Pi's stored catalog.
+	 */
+	const loadStartupCatalog = async (): Promise<void> => {
+		let credential: ApiKeyCredential | undefined;
+		try {
+			const stored = readStoredCredential(providerId, join(agentDir, AUTH_FILE_NAME));
+			credential = stored?.type === "api_key" ? stored : undefined;
+		} catch {
+			// Env and cliproxyapi.json credentials remain usable.
+		}
+		const connection = credentialConnection(credential);
+		if (!connection) return;
+		try {
+			const loaded = await loadMappedModels(connection.baseUrl, connection.apiKey, {
+				agentDir,
+				signal: AbortSignal.timeout(STARTUP_CATALOG_TIMEOUT_MS),
+				useMaxContextWindow: useMaxContextWindow(agentDir),
+			});
+			const baseUrl = resolveEndpoints(connection.baseUrl).inferenceBaseUrl;
+			startup = { baseUrl, models: bindModels(loaded.models, baseUrl), at: Date.now() };
+			setModels(startup.models);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logWarn(`failed to load models at startup (${message}); using Pi's stored catalog if available.`);
+		}
+	};
+	return { loadStartupCatalog };
 }
 
 export function registerPauseCommands(options: {
@@ -426,10 +428,8 @@ export function registerFastCommand(options: {
 	providerId: string;
 	fastMode: FastModeController;
 	onStatusChange?: (ctx: ExtensionContext) => void;
-	onModeChange?: (enabled: boolean, ctx: ExtensionContext) => Promise<void>;
 }): void {
-	const { pi, agentDir, providerId, fastMode, onStatusChange, onModeChange } = options;
-	let modeChangeInProgress = false;
+	const { pi, agentDir, providerId, fastMode, onStatusChange } = options;
 
 	pi.registerCommand("fast", {
 		description: "Toggle CLIProxyAPI Fast mode globally.",
@@ -438,75 +438,32 @@ export function registerFastCommand(options: {
 				ctx.ui.notify("Usage: /fast", "error");
 				return;
 			}
-			if (modeChangeInProgress) {
-				ctx.ui.notify("Fast mode is already being refreshed. Try again when it finishes.", "warning");
+
+			const enabled = !fastMode.isEnabled();
+			try {
+				saveConfigFile(agentDir, { fast: enabled });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
 				return;
 			}
+			fastMode.setEnabled(enabled);
+			onStatusChange?.(ctx);
 
-			modeChangeInProgress = true;
-			try {
-				const previousEnabled = fastMode.isEnabled();
-				const enabled = !previousEnabled;
-				try {
-					saveConfigFile(agentDir, { fast: enabled });
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					ctx.ui.notify(`Failed to save Fast mode: ${message}`, "error");
-					return;
+			const currentModel = ctx.model;
+			if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
+				if (enabled) {
+					ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
+				} else {
+					ctx.ui.notify("Fast mode is disabled globally.", "info");
 				}
-				fastMode.setEnabled(enabled);
-				try {
-					await onModeChange?.(enabled, ctx);
-				} catch (error) {
-					// Restore all three views of the mode after a partial refresh:
-					// in-memory request behavior, persisted preference, and model metadata.
-					fastMode.setEnabled(previousEnabled);
-					const rollbackErrors: string[] = [];
-					try {
-						saveConfigFile(agentDir, { fast: previousEnabled });
-					} catch (rollbackError) {
-						rollbackErrors.push(
-							`config rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
-						);
-					}
-					try {
-						await onModeChange?.(previousEnabled, ctx);
-					} catch (rollbackError) {
-						rollbackErrors.push(
-							`pricing rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
-						);
-					}
-					const message = error instanceof Error ? error.message : String(error);
-					const rollbackSuffix = rollbackErrors.length > 0 ? ` (${rollbackErrors.join("; ")})` : "";
-					ctx.ui.notify(`Failed to refresh model pricing: ${message}${rollbackSuffix}`, "warning");
-					onStatusChange?.(ctx);
-					return;
-				}
-				onStatusChange?.(ctx);
-
-				const currentModel = ctx.model;
-				if (!currentModel || currentModel.provider !== providerId || !fastMode.isModelSupported(currentModel.id)) {
-					if (enabled) {
-						ctx.ui.notify("Fast mode is enabled globally, but the current model does not support it.", "warning");
-					} else {
-						ctx.ui.notify("Fast mode is disabled globally.", "info");
-					}
-				}
-			} finally {
-				modeChangeInProgress = false;
 			}
 		},
 	});
 }
 
-export function registerRefreshCommand(options: {
-	pi: ExtensionAPI;
-	agentDir: string;
-	providerId: string;
-	providerName: string;
-	onRefresh: (connection: NonNullable<ReturnType<typeof resolveConnection>>) => Promise<RefreshResult | undefined>;
-}): void {
-	const { pi, agentDir, providerId, providerName, onRefresh } = options;
+export function registerRefreshCommand(options: { pi: ExtensionAPI; providerId: string; providerName: string }): void {
+	const { pi, providerId, providerName } = options;
 
 	pi.registerCommand("cliproxyapi-refresh", {
 		description: "Force refresh CLIProxyAPI models from the remote catalog.",
@@ -516,19 +473,20 @@ export function registerRefreshCommand(options: {
 				return;
 			}
 
-			const connection = resolveConnection(agentDir, providerId);
-			if (!connection) {
-				ctx.ui.notify(
-					`CLIProxyAPI is not configured. Use /login ${providerName} or /login ${providerId}.`,
-					"error",
-				);
-				return;
-			}
-
 			try {
-				const result = await onRefresh(connection);
-				if (!result) return;
-				ctx.ui.notify(`Refreshed ${result.modelCount} CLIProxyAPI models from ${result.modelsUrl}.`, "info");
+				if (!(await ctx.modelRegistry.getProviderAuth(providerId))) {
+					ctx.ui.notify(
+						`CLIProxyAPI is not configured. Use /login ${providerName} or /login ${providerId}.`,
+						"error",
+					);
+					return;
+				}
+				const result = await ctx.modelRegistry.refresh({ providers: [providerId], force: true });
+				const error = result.errors.get(providerId);
+				if (error) throw error;
+				if (result.aborted) throw new Error("refresh was cancelled");
+				const count = ctx.modelRegistry.getAll().filter((model) => model.provider === providerId).length;
+				ctx.ui.notify(`Refreshed ${count} CLIProxyAPI models.`, "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Failed to refresh CLIProxyAPI models: ${message}`, "error");
@@ -543,7 +501,6 @@ export { resolveEndpoints, toPiModel } from "./lib.ts";
 export default async function (pi: ExtensionAPI): Promise<void> {
 	const agentDir = getAgentDir();
 	const identity = resolveIdentity(agentDir);
-	const defaultBaseUrl = resolveDefaultBaseUrl(agentDir, identity.providerId);
 
 	let pauseEnabled = false;
 	try {
@@ -577,23 +534,23 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			`invalid native search configuration (${error instanceof Error ? error.message : String(error)}); using webSearch=false`,
 		);
 	}
-	const modelRefreshCoordinator = new ModelRefreshCoordinator();
+
+	try {
+		if (process.env.CLIPROXYAPI_TRANSPORT || (loadConfigFile(agentDir) as { transport?: unknown }).transport) {
+			logWarn(
+				`CLIPROXYAPI_TRANSPORT and ${CONFIG_FILE_NAME} "transport" are ignored; set Pi's "transport" in settings.json instead.`,
+			);
+		}
+	} catch {
+		// Config errors are reported where the config is actually used.
+	}
 
 	let stream: CliproxyCodexStream;
 	let streamSimple: CliproxyCodexStreamSimple;
 	try {
-		let transport: ReturnType<typeof resolveTransportSetting>;
-		try {
-			transport = resolveTransportSetting(agentDir);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			logWarn(`invalid transport configuration (${message}); using catalog default`);
-			transport = undefined;
-		}
 		const streams = loadCliproxyCodexStreams({
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 			getSessionHeaders: (options) => hierarchy.headers(options),
-			transport,
 			prefersSse: (model) => model.provider === identity.providerId && capabilities.sse.has(model.id),
 		});
 		stream = streams.stream;
@@ -617,127 +574,26 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const status = new ProviderStatusController(identity.providerId, fastMode);
 	status.register(pi);
 	capabilities.changed = () => status.refresh();
-	let refreshModelsForFast: ((ctx: ExtensionContext) => Promise<void>) | undefined;
-	const onFastModeChange = async (_enabled: boolean, ctx: ExtensionContext): Promise<void> => {
-		await refreshModelsForFast?.(ctx);
-	};
 	registerFastCommand({
 		pi,
 		agentDir,
 		providerId: identity.providerId,
 		fastMode,
 		onStatusChange: (ctx) => status.refresh(ctx),
-		onModeChange: onFastModeChange,
 	});
 
-	// Always register native auth so provider is visible in /login immediately after install.
-	registerProvider(pi, {
+	// Always register native auth so the provider is visible in /login immediately after install.
+	// Pi restores, persists, and refreshes the catalog through refreshModels.
+	const provider = registerProvider(pi, {
 		providerId: identity.providerId,
 		providerName: identity.providerName,
-		baseUrlInput: defaultBaseUrl,
 		agentDir,
 		stream,
 		streamSimple,
 		fastMode,
 		capabilities,
-		refreshCoordinator: modelRefreshCoordinator,
 	});
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
-
-	const connection = resolveConnection(agentDir, identity.providerId);
-	const registerConfiguredProvider = async (
-		currentConnection: NonNullable<ReturnType<typeof resolveConnection>>,
-		options: { forceRefresh?: boolean } = {},
-	): Promise<RefreshResult | undefined> => {
-		const refresh = modelRefreshCoordinator.begin();
-		try {
-			const { loaded, fromCache } = await resolveMappedModels(
-				agentDir,
-				currentConnection.baseUrlInput,
-				currentConnection.apiKey,
-				{
-					forceRefresh: options.forceRefresh,
-					fastMode: fastMode.isEnabled(),
-					useMaxContextWindow: useMaxContextWindow(agentDir),
-					signal: refresh.signal,
-					shouldCommit: () => modelRefreshCoordinator.isCurrent(refresh.generation),
-				},
-			);
-			if (!modelRefreshCoordinator.isCurrent(refresh.generation)) return undefined;
-
-			setModelCapabilities(fastMode, capabilities, loaded);
-
-			registerProvider(pi, {
-				providerId: identity.providerId,
-				providerName: identity.providerName,
-				baseUrlInput: currentConnection.baseUrlInput,
-				models: loaded.models,
-				agentDir,
-				stream,
-				streamSimple,
-				fastMode,
-				capabilities,
-				refreshCoordinator: modelRefreshCoordinator,
-			});
-
-			if (fromCache && !options.forceRefresh) {
-				void registerConfiguredProvider(currentConnection, { forceRefresh: true }).catch((error) => {
-					const message = error instanceof Error ? error.message : String(error);
-					logWarn(`failed to refresh cached models (${message}); keeping the cached model list.`);
-				});
-			}
-
-			return { modelCount: loaded.models.length, modelsUrl: loaded.modelsUrl };
-		} catch (error) {
-			if (!modelRefreshCoordinator.isCurrent(refresh.generation)) return undefined;
-			throw error;
-		}
-	};
-	refreshModelsForFast = async (ctx: ExtensionContext): Promise<void> => {
-		const currentConnection = resolveConnection(agentDir, identity.providerId);
-		if (!currentConnection) return;
-
-		const refreshed = await registerConfiguredProvider(currentConnection, { forceRefresh: true });
-		if (!refreshed) return;
-		const currentModel = ctx.model;
-		if (!currentModel || currentModel.provider !== identity.providerId) return;
-
-		const refreshedModel = ctx.modelRegistry.find(identity.providerId, currentModel.id);
-		if (!refreshedModel) {
-			throw new Error(`Refreshed model ${identity.providerId}/${currentModel.id} is unavailable`);
-		}
-		if (JSON.stringify(refreshedModel.cost) === JSON.stringify(currentModel.cost)) return;
-		if (!(await pi.setModel(refreshedModel))) {
-			throw new Error(`Unable to activate refreshed model ${identity.providerId}/${currentModel.id}`);
-		}
-	};
-	registerRefreshCommand({
-		pi,
-		agentDir,
-		providerId: identity.providerId,
-		providerName: identity.providerName,
-		onRefresh: (currentConnection) => registerConfiguredProvider(currentConnection, { forceRefresh: true }),
-	});
-
-	if (!connection) {
-		logInfo(
-			`not configured yet. Use /login ${identity.providerName} or /login ${identity.providerId}. ` +
-				`Menu path: /login → Sign in with an account → ${identity.providerName}. ` +
-				`Or set ${CONFIG_FILE_NAME} / CLIPROXYAPI_API_KEY.`,
-		);
-		return;
-	}
-
-	try {
-		await registerConfiguredProvider(connection);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (isUnauthorizedModelsError(error)) {
-			logWarn(`models request unauthorized (${message}). Use /login ${identity.providerName} to reconfigure.`);
-		} else {
-			logWarn(
-				`failed to load models (${message}). Use /login ${identity.providerName} or check ${CONFIG_FILE_NAME} / CLIPROXYAPI_* env vars.`,
-			);
-		}
-	}
+	registerRefreshCommand({ pi, providerId: identity.providerId, providerName: identity.providerName });
+	await provider.loadStartupCatalog();
 }

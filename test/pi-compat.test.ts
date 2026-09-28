@@ -141,7 +141,6 @@ describe("Pi native provider compatibility", () => {
 				expect(commands.has("continue")).toBe(true);
 				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi")).toBe(false);
-				expect(pi.unregisterProvider).toHaveBeenCalledWith("cliproxyapi");
 				const provider = registeredProviders.get("cliproxyapi") as {
 					stream?: unknown;
 					streamSimple?: unknown;
@@ -294,7 +293,8 @@ describe("Pi native provider compatibility", () => {
 					key: "native-key",
 					env: { CLIPROXYAPI_BASE_URL: "http://127.0.0.1:8317" },
 				});
-				expect(provider.getModels().map((model) => model.id)).toEqual(["native-model"]);
+				// Login only validates; Pi refreshes the catalog through refreshModels once auth.json is written.
+				expect(provider.getModels()).toEqual([]);
 				// The login callback runs before Pi persists auth.json, so old config remains available on failure.
 				expect(JSON.parse(readFileSync(join(agentDir, "cliproxyapi.json"), "utf8"))).toMatchObject({
 					apiKey: "old-key",
@@ -367,6 +367,9 @@ describe("Pi native provider compatibility", () => {
 					env: { CLIPROXYAPI_BASE_URL: "http://new.example" },
 				});
 				expect(JSON.parse(readFileSync(join(agentDir, "cliproxyapi.json"), "utf8"))).toEqual({ fast: true });
+				// Interactive Pi refreshes the provider's catalog right after login.
+				const refreshed = await runtime.refresh({ providers: ["cliproxyapi"] });
+				expect(refreshed.errors.size).toBe(0);
 				expect(runtime.getModel("cliproxyapi", "runtime-model")).toEqual(
 					expect.objectContaining({
 						id: "runtime-model",
@@ -480,18 +483,20 @@ describe("Pi native provider compatibility", () => {
 
 			try {
 				await providerExtension(pi);
-				catalogVersion = 2;
 				const provider = registeredProviders.get("cliproxyapi") as {
 					refreshModels?: (context: RefreshContext) => Promise<void>;
 					getModels: () => Array<{ id: string }>;
 				};
+				// The factory loads the catalog so print mode can resolve --model before Pi goes online.
+				expect(provider.getModels().map((model) => model.id)).toEqual(["model-1"]);
+				catalogVersion = 2;
 				// A superseded publication must not change provider state.
-				const stale = refreshContext({}, false);
+				const stale = refreshContext({ force: true }, false);
 				await provider.refreshModels?.(stale);
 				expect(stale.publish).toHaveBeenCalledTimes(1);
 				expect(provider.getModels().map((model) => model.id)).toEqual(["model-1"]);
 
-				await provider.refreshModels?.(refreshContext());
+				await provider.refreshModels?.(refreshContext({ force: true }));
 				expect(provider.getModels().map((model) => model.id)).toEqual(["model-2"]);
 			} finally {
 				fetchMock.mockRestore();
@@ -505,7 +510,7 @@ describe("Pi native provider compatibility", () => {
 				join(agentDir, "cliproxyapi.json"),
 				JSON.stringify({ baseUrl: "http://cpa.invalid", apiKey: "key", webSearch: true }),
 			);
-			const { pi, registeredProviders, registeredModels } = createPiMock(new Map());
+			const { pi, registeredProviders } = createPiMock(new Map());
 			let supported = true;
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 				if (String(input).startsWith("https://models.dev/")) return new Response("{}");
@@ -515,8 +520,9 @@ describe("Pi native provider compatibility", () => {
 			});
 			try {
 				await providerExtension(pi);
+				const provider = registeredProviders.get("cliproxyapi") as unknown as Provider;
 				const tool = vi.mocked(pi.registerTool).mock.calls.find(([tool]) => tool.name === "cliproxyapi_search")![0];
-				const model = registeredModels.get("cliproxyapi/search-model")!;
+				const model = provider.getModels().find((entry) => entry.id === "search-model")!;
 				const getAuth = vi.fn(async () => ({ ok: false, error: "test auth boundary" }));
 				const ctx = {
 					model,
@@ -527,8 +533,7 @@ describe("Pi native provider compatibility", () => {
 				);
 				expect(getAuth).toHaveBeenCalledTimes(1);
 				supported = false;
-				const provider = registeredProviders.get("cliproxyapi") as unknown as Provider;
-				await provider.refreshModels?.(refreshContext());
+				await provider.refreshModels?.(refreshContext({ force: true }));
 				await expect(tool.execute("test", { query: "news" }, undefined, undefined, ctx)).rejects.toThrow(
 					"explicit web_search support",
 				);
@@ -539,75 +544,43 @@ describe("Pi native provider compatibility", () => {
 		});
 	});
 
-	it("updates the active session model with Fast pricing after /fast", async () => {
+	it("toggles Fast without refetching the catalog or replacing the active model", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeFileSync(
 				join(agentDir, "cliproxyapi.json"),
 				JSON.stringify({ baseUrl: "http://127.0.0.1:8317", apiKey: "stored-key" }),
 				"utf8",
 			);
-
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
-			const { pi, modelRegistry, registeredModels } = createPiMock(commands);
+			const { pi, registeredProviders } = createPiMock(commands);
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 				if (String(input).startsWith("https://models.dev/")) {
 					return new Response(
-						JSON.stringify({
-							openai: {
-								models: {
-									"gpt-5.6-sol": {
-										cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 },
-										experimental: {
-											modes: {
-												fast: {
-													cost: { input: 10, output: 60, cache_read: 1, cache_write: 12.5 },
-												},
-											},
-										},
-									},
-								},
-							},
-						}),
-						{ status: 200, headers: { "Content-Type": "application/json" } },
+						JSON.stringify({ openai: { models: { "gpt-5.6-sol": { cost: { input: 5, output: 30 } } } } }),
 					);
 				}
 				return new Response(
 					JSON.stringify({ models: [{ slug: "gpt-5.6-sol", service_tiers: [{ id: "priority" }] }] }),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
 			});
 
 			try {
 				await providerExtension(pi);
-				const currentModel = registeredModels.get("cliproxyapi/gpt-5.6-sol");
-				expect(currentModel?.cost.input).toBe(5);
-				const command = commands.get("fast");
-				if (!command || !currentModel) throw new Error("Fast command or active model is unavailable");
+				const provider = registeredProviders.get("cliproxyapi") as unknown as Provider;
+				await provider.refreshModels?.(refreshContext());
+				const currentModel = provider.getModels()[0]!;
+				const fetchCount = fetchMock.mock.calls.length;
+				const notify = vi.fn();
+				await commands
+					.get("fast")
+					?.handler("", { model: currentModel, ui: { notify } } as unknown as ExtensionCommandContext);
 
-				const ctx = {
-					model: currentModel,
-					modelRegistry,
-					ui: { notify: vi.fn() },
-				} as unknown as ExtensionCommandContext;
-				await command.handler("", ctx);
-
-				expect(pi.setModel).toHaveBeenCalledWith(
-					expect.objectContaining({
-						id: "gpt-5.6-sol",
-						provider: "cliproxyapi",
-						cost: { input: 10, output: 60, cacheRead: 1, cacheWrite: 12.5 },
-					}),
-				);
-
-				const fastModel = (pi.setModel as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Model<Api>;
-				await command.handler("", { ...ctx, model: fastModel });
-				expect(pi.setModel).toHaveBeenLastCalledWith(
-					expect.objectContaining({
-						id: "gpt-5.6-sol",
-						provider: "cliproxyapi",
-						cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
-					}),
-				);
+				expect(JSON.parse(readFileSync(join(agentDir, "cliproxyapi.json"), "utf8"))).toMatchObject({ fast: true });
+				expect(notify).not.toHaveBeenCalled();
+				expect(fetchMock).toHaveBeenCalledTimes(fetchCount);
+				expect(pi.setModel).not.toHaveBeenCalled();
+				// Standard rates stay on the model; Pi's Codex stream applies the priority multiplier per request.
+				expect(provider.getModels()[0]?.cost).toMatchObject({ input: 5, output: 30 });
 			} finally {
 				fetchMock.mockRestore();
 			}

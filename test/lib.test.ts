@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	AUTH_FILE_NAME,
 	buildInputModalities,
 	buildThinkingLevelMap,
 	CONFIG_FILE_NAME,
@@ -13,13 +12,10 @@ import {
 	DEFAULT_MAX_TOKENS,
 	DEFAULT_PROVIDER_ID,
 	DEFAULT_PROVIDER_NAME,
-	decodeRefreshMeta,
-	encodeRefreshMeta,
 	extractReasoningEfforts,
 	fetchModelsDevCostMap,
 	firstNonEmpty,
 	isUnauthorizedModelsError,
-	loadAuthConnection,
 	loadConfigFile,
 	ModelsHttpError,
 	matchModelCost,
@@ -29,7 +25,6 @@ import {
 	resolveEndpoints,
 	resolveFastDefault,
 	resolveIdentity,
-	resolveTransportSetting,
 	resolveUseMaxContextWindow,
 	resolveWebSearchDefault,
 	saveConfigFile,
@@ -145,20 +140,6 @@ describe("native search opt-in", () => {
 	});
 });
 
-describe("refresh meta codec", () => {
-	it("round-trips baseUrl metadata", () => {
-		const encoded = encodeRefreshMeta("http://127.0.0.1:8317");
-		expect(decodeRefreshMeta(encoded)).toEqual({ baseUrl: "http://127.0.0.1:8317" });
-	});
-
-	it("returns null for invalid or empty refresh tokens", () => {
-		expect(decodeRefreshMeta(undefined)).toBeNull();
-		expect(decodeRefreshMeta("")).toBeNull();
-		expect(decodeRefreshMeta("not-json")).toBeNull();
-		expect(decodeRefreshMeta(JSON.stringify({ foo: 1 }))).toBeNull();
-	});
-});
-
 describe("model mapping helpers", () => {
 	it("extracts unique reasoning efforts from objects and strings", () => {
 		expect(
@@ -239,7 +220,7 @@ describe("model mapping helpers", () => {
 	it("uses maximum context windows only when opted in", () => {
 		const catalogModel = { slug: "large", context_window: 272000, max_context_window: 400000 };
 		expect(toPiModel(catalogModel)?.contextWindow).toBe(272000);
-		expect(toPiModel(catalogModel, undefined, false, true)?.contextWindow).toBe(400000);
+		expect(toPiModel(catalogModel, undefined, true)?.contextWindow).toBe(400000);
 	});
 
 	it("maps catalog output token limits", () => {
@@ -327,12 +308,6 @@ describe("models.dev cost mapping", () => {
 					},
 				],
 			});
-			expect(matchModelCost("gpt-5.6-sol", catalog, true)).toEqual({
-				input: 10,
-				output: 60,
-				cacheRead: 1,
-				cacheWrite: 12.5,
-			});
 			expect(matchModelMaxTokens("gpt-5.6-sol", catalog)).toBe(128000);
 			expect(toPiModel({ slug: "gpt-5.6-sol" }, catalog)?.maxTokens).toBe(128000);
 			expect(toPiModel({ slug: "gpt-5.6-sol", max_tokens: 64000 }, catalog)?.maxTokens).toBe(64000);
@@ -381,7 +356,6 @@ describe("models.dev cost mapping", () => {
 		try {
 			const catalog = await fetchModelsDevCostMap(tempAgentDir(), true);
 			expect(matchModelCost("gemini-pro-agent", catalog)).toMatchObject({ input: 2, output: 12 });
-			expect(matchModelCost("gemini-pro-agent", catalog, true)).toMatchObject({ input: 4, output: 24 });
 			expect(matchModelCost("gemini-3.1-pro-low", catalog).input).toBe(2);
 			expect(matchModelCost("gemini-3.6-flash-high", catalog).output).toBe(7.5);
 			expect(matchModelCost("gemini-3-flash-agent", catalog).output).toBe(9);
@@ -507,46 +481,6 @@ describe("config and auth file helpers", () => {
 		}
 	});
 
-	it("loads oauth auth connection metadata", () => {
-		const agentDir = tempAgentDir();
-		writeFileSync(
-			join(agentDir, AUTH_FILE_NAME),
-			JSON.stringify({
-				cliproxyapi: {
-					type: "oauth",
-					access: "sk-test",
-					refresh: encodeRefreshMeta("http://127.0.0.1:8317"),
-				},
-			}),
-			"utf8",
-		);
-
-		expect(loadAuthConnection(agentDir, "cliproxyapi")).toEqual({
-			apiKey: "sk-test",
-			baseUrl: "http://127.0.0.1:8317",
-		});
-	});
-
-	it("loads api_key auth connection", () => {
-		const agentDir = tempAgentDir();
-		writeFileSync(
-			join(agentDir, AUTH_FILE_NAME),
-			JSON.stringify({
-				cliproxyapi: {
-					type: "api_key",
-					key: "plain-key",
-					env: { CLIPROXYAPI_BASE_URL: "http://127.0.0.1:9000" },
-				},
-			}),
-			"utf8",
-		);
-
-		expect(loadAuthConnection(agentDir, "cliproxyapi")).toEqual({
-			apiKey: "plain-key",
-			baseUrl: "http://127.0.0.1:9000",
-		});
-	});
-
 	it("parses Fast boolean settings", () => {
 		for (const value of ["true", "1", "yes", "ON"]) {
 			expect(parseBooleanSetting(value)).toBe(true);
@@ -593,29 +527,6 @@ describe("config and auth file helpers", () => {
 				delete process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW;
 			} else {
 				process.env.CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW = previous;
-			}
-		}
-	});
-
-	it("resolves transport from config with env precedence", () => {
-		const agentDir = tempAgentDir();
-		saveConfigFile(agentDir, { transport: "auto" });
-		const previous = process.env.CLIPROXYAPI_TRANSPORT;
-		try {
-			delete process.env.CLIPROXYAPI_TRANSPORT;
-			expect(resolveTransportSetting(tempAgentDir())).toBeUndefined();
-			expect(resolveTransportSetting(agentDir)).toBe("auto");
-			process.env.CLIPROXYAPI_TRANSPORT = "websocket-cached";
-			expect(resolveTransportSetting(agentDir)).toBe("websocket-cached");
-			process.env.CLIPROXYAPI_TRANSPORT = "sse";
-			expect(resolveTransportSetting(agentDir)).toBe("sse");
-			process.env.CLIPROXYAPI_TRANSPORT = "invalid";
-			expect(() => resolveTransportSetting(agentDir)).toThrow(/websocket, websocket-cached, auto, sse/);
-		} finally {
-			if (previous === undefined) {
-				delete process.env.CLIPROXYAPI_TRANSPORT;
-			} else {
-				process.env.CLIPROXYAPI_TRANSPORT = previous;
 			}
 		}
 	});

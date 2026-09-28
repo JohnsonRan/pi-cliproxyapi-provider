@@ -19,7 +19,12 @@ function tokenCount(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-export function parseSearchResponse(payload: unknown, model: Model<Api>) {
+/** Mirrors Pi's stock Codex priority-tier pricing, which the raw search request bypasses. */
+function priorityMultiplier(model: Model<Api>): number {
+	return model.id === "gpt-5.5" ? 2.5 : 2;
+}
+
+export function parseSearchResponse(payload: unknown, model: Model<Api>, priority = false) {
 	const response = record(payload);
 	if (response.error || (response.status !== "completed" && response.status !== "incomplete")) {
 		throw new Error("CLIProxyAPI native search did not complete successfully.");
@@ -101,6 +106,12 @@ export function parseSearchResponse(payload: unknown, model: Model<Api>) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 		calculateCost(model, usage);
+		if (priority) {
+			const multiplier = priorityMultiplier(model);
+			for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
+				usage.cost[key] *= multiplier;
+			}
+		}
 	}
 	return {
 		content,
@@ -200,6 +211,7 @@ export function registerNativeSearch(options: {
 				headers.set("X-Api-Key", auth.apiKey);
 				headers.set("Content-Type", "application/json");
 				headers.set("Accept", "application/json");
+				const priority = shouldUseFast(model.id);
 				const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
 				const response = await fetch(endpoint, {
 					method: "POST",
@@ -218,10 +230,10 @@ export function registerNativeSearch(options: {
 						tool_choice: "required",
 						include: ["web_search_call.action.sources"],
 						max_output_tokens: Math.min(model.maxTokens, 4096),
-						...(shouldUseFast(model.id) ? { service_tier: "priority" } : {}),
+						...(priority ? { service_tier: "priority" } : {}),
 					}),
 				});
-				return parseSearchResponse(await readSearchResponse(response), model);
+				return parseSearchResponse(await readSearchResponse(response), model, priority);
 			},
 		});
 		registered = true;

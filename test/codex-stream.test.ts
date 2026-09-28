@@ -198,7 +198,6 @@ describe("Pi stock Codex streams", () => {
 		vi.stubGlobal("WebSocket", FakeWebSocket);
 		const hierarchy = new SessionHierarchy();
 		const streams = loadCliproxyCodexStreams({
-			transport: "websocket",
 			getSessionHeaders: (options) => hierarchy.headers(options),
 		});
 		const result = await streams[method](createModel(), normalizeContext({ messages: [userMessage("hello")] }), {
@@ -213,7 +212,7 @@ describe("Pi stock Codex streams", () => {
 		expect(FakeWebSocket.instances[0]?.sent[0]?.prompt_cache_key).toBe("child-id");
 	});
 
-	it("sends SSE through the public stock API with split auth and Fast payload shaping", async () => {
+	it("sends SSE through the public stock API with split auth and Fast priority pricing", async () => {
 		let requestUrl: string | undefined;
 		let requestHeaders: IncomingHttpHeaders | undefined;
 		let observedPayload: unknown;
@@ -242,9 +241,11 @@ describe("Pi stock Codex streams", () => {
 
 		try {
 			const address = server.address() as AddressInfo;
-			const model = createModel(`http://127.0.0.1:${address.port}/backend-api/`);
+			const model = {
+				...createModel(`http://127.0.0.1:${address.port}/backend-api/`),
+				cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+			};
 			const streams = loadCliproxyCodexStreams({
-				transport: "sse",
 				shouldUseFast: () => true,
 				getSessionHeaders: (options) => new SessionHierarchy().headers(options),
 			});
@@ -254,6 +255,7 @@ describe("Pi stock Codex streams", () => {
 					{ messages: [userMessage("hello")] },
 					{
 						apiKey: REAL_API_KEY,
+						transport: "sse",
 						sessionId: "sse-child",
 						metadata: { parent_session_id: "sse-parent" },
 						onPayload: (payload) => {
@@ -277,6 +279,8 @@ describe("Pi stock Codex streams", () => {
 			expect(authorization).toBe(`Bearer ${createSyntheticCodexJwt(REAL_API_KEY)}`);
 			expect(requestHeaders?.["chatgpt-account-id"]).toBe(createSyntheticCodexAccountId(REAL_API_KEY));
 			expect(observedPayload).toMatchObject({ service_tier: "priority" });
+			// Pi's stock Codex stream applies priority pricing (2x) when Fast requests the tier.
+			expect(result.usage.cost.input).toBeCloseTo((2 * 5) / 1_000_000, 12);
 		} finally {
 			await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 		}
@@ -285,7 +289,7 @@ describe("Pi stock Codex streams", () => {
 	it("replays parallel tool calls from sessions using the legacy custom API id", async () => {
 		vi.stubGlobal("WebSocket", FakeWebSocket);
 		const model = createModel();
-		const streams = loadCliproxyCodexStreams({ transport: "websocket" });
+		const streams = loadCliproxyCodexStreams();
 		const legacyAssistant: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -340,16 +344,17 @@ describe("Pi stock Codex streams", () => {
 		vi.stubGlobal("WebSocket", FakeWebSocket);
 		const model = createModel();
 		const sessionId = "cached-session";
-		const streams = loadCliproxyCodexStreams({ transport: "websocket-cached" });
+		const streams = loadCliproxyCodexStreams();
+		const transport = "websocket-cached" as const;
 
 		const first = await streams
-			.streamSimple(model, { messages: [userMessage("first")] }, { apiKey: REAL_API_KEY, sessionId })
+			.streamSimple(model, { messages: [userMessage("first")] }, { apiKey: REAL_API_KEY, sessionId, transport })
 			.result();
 		const second = await streams
 			.streamSimple(
 				model,
 				{ messages: [userMessage("first"), first, userMessage("second")] },
-				{ apiKey: REAL_API_KEY, sessionId },
+				{ apiKey: REAL_API_KEY, sessionId, transport },
 			)
 			.result();
 
@@ -369,7 +374,11 @@ describe("Pi stock Codex streams", () => {
 		expect(firstHeaders.get("chatgpt-account-id")).toBe(createSyntheticCodexAccountId(REAL_API_KEY));
 
 		await streams
-			.streamSimple(model, { messages: [userMessage("new account")] }, { apiKey: "rotated-key", sessionId })
+			.streamSimple(
+				model,
+				{ messages: [userMessage("new account")] },
+				{ apiKey: "rotated-key", sessionId, transport },
+			)
 			.result();
 		expect(FakeWebSocket.instances).toHaveLength(2);
 		expect(toHeaders(FakeWebSocket.instances[1]?.options.headers).get("X-Api-Key")).toBe("rotated-key");

@@ -9,9 +9,9 @@ Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-
 - uses Pi's native API-key login and stores credentials only in `auth.json`;
 - standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
 - uses Pi's public stock `openai-codex-responses` stream without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
-- adds configurable `websocket`, `websocket-cached`, `auto`, and `sse` transports, defaulting to persistent WebSocket, or SSE for models the CPA catalog marks `prefer_websockets: false`;
+- follows Pi's `transport` setting; under Pi's default `auto`, uses persistent WebSocket, or SSE for models the CPA catalog marks `prefer_websockets: false`;
 - resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
-- improves catalog mapping with native model refresh, opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
+- keeps the model catalog in Pi's native model store and refresh lifecycle, and improves catalog mapping with opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
 
 Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex client protocol to the configured backend. Keeping one client protocol avoids unreliable origin inference and preserves the Codex-specific WebSocket, compaction, Fast, and tool behavior used by this extension.
 
@@ -23,7 +23,7 @@ Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex cl
 4. Maps the CLIProxyAPI catalog into pi models, including Fast service-tier capability.
 5. Registers inference against `{root}/backend-api/` with Pi's standard `openai-codex-responses` API metadata.
 6. Provides `/fast` to toggle OpenAI priority processing for supported models.
-7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json`, refreshes it in the background on startup, and provides `/cliproxyapi-refresh` to force a refresh.
+7. Stores the model catalog through Pi's native provider refresh lifecycle (Pi's `models-store.json`) and provides `/cliproxyapi-refresh` to force a refresh.
 8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 9. Leaves compaction triggering to Pi, including native checks between tool turns. After compaction, closes the reused Codex WebSocket for that session so CLIProxyAPI's server-side context resets with the compacted client messages. The extension does not inject synthetic context-overflow errors or block summary requests.
 
@@ -68,15 +68,14 @@ Then choose **CLIProxyAPI** from API-key providers and enter:
    - base URL — preferred form is host:port, e.g. `http://127.0.0.1:8317`
    - API key
 
-Final login validation calls `{root}/v1/models?client_version=cpa` (this always bypasses the model cache and forces a fresh remote query):
+Final login validation calls `{root}/v1/models?client_version=cpa`:
 
-- **HTTP 200** → login succeeds (empty model list is still OK) and a non-empty catalog rewrites the model cache; an empty one keeps a populated cache (see [Model cache](#model-cache))
+- **HTTP 200** → login succeeds (an empty model list is still OK)
 - **non-200 / network error** → login fails and you are prompted to re-enter base URL + API key
 
 On success:
 
-- models are registered immediately in the current session (0 models is allowed)
-- Pi stores the API key and base URL in `~/.pi/agent/auth.json`
+- Pi stores the API key and base URL in `~/.pi/agent/auth.json`, then refreshes this provider's catalog (0 models is allowed)
 - after Pi persists the native credential, duplicate `baseUrl` / `apiKey` fields are removed from `~/.pi/agent/cliproxyapi.json`
 
 Re-run `/login CLIProxyAPI` or `/login cliproxyapi` anytime to reconfigure. `/logout` removes the native credential; non-secret settings in `cliproxyapi.json` remain.
@@ -111,7 +110,6 @@ Optional fields:
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
 | `webSearch` | `false` | Enable the `cliproxyapi_search` tool for models with explicit native search support |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
-| `transport` | _(per model)_ | Unset: `websocket`, or `sse` for models the catalog marks `prefer_websockets: false` (CPA does this for non-Codex backends). Set explicitly to force one request transport for every model: persistent full-context `websocket`, persistent incremental-context `websocket-cached`, stock automatic `auto`, or `sse` |
 | `useMaxContextWindow` | `false` | Use catalog `max_context_window` instead of standard `context_window` when available |
 
 ### Environment overrides
@@ -125,7 +123,6 @@ Optional fields:
 | `CLIPROXYAPI_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
 | `CLIPROXYAPI_WEB_SEARCH` | `webSearch` (same boolean forms as `CLIPROXYAPI_FAST`) |
 | `CLIPROXYAPI_PARENT_SESSION_ID` | Explicit immediate parent session ID supplied by a child launcher; not a root ID or file path |
-| `CLIPROXYAPI_TRANSPORT` | `transport` (`websocket`, `websocket-cached`, `auto`, or `sse`) |
 | `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` | `useMaxContextWindow` (same boolean forms as `CLIPROXYAPI_FAST`) |
 
 Resolution order for connection settings:
@@ -135,7 +132,13 @@ Resolution order for connection settings:
 3. `cliproxyapi.json`
 4. Default baseUrl `http://127.0.0.1:8317`
 
-The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`. Transport resolves as `CLIPROXYAPI_TRANSPORT` → `cliproxyapi.json` → per-model catalog default (`websocket` unless `prefer_websockets: false`). Maximum context is opt-in via `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` → `cliproxyapi.json` → `false`.
+The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`. Maximum context is opt-in via `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` → `cliproxyapi.json` → `false`.
+
+### Transport
+
+CLIProxyAPI requests follow Pi's own `transport` setting (`~/.pi/agent/settings.json`, see Pi's settings docs). With Pi's default `auto`, the catalog decides per model: persistent `websocket`, or `sse` for models CPA marks `prefer_websockets: false` (CPA does this for non-Codex backends). Setting Pi's `transport` to `websocket`, `websocket-cached`, or `sse` applies that transport to every CLIProxyAPI model. One-off native summary requests (`cacheRetention: "none"`) always use SSE.
+
+`CLIPROXYAPI_TRANSPORT` and the `transport` field in `cliproxyapi.json` are no longer read; a startup warning points to Pi's setting if either is still present.
 
 Pi's stock Codex transport behavior applies: `websocket`, `websocket-cached`, and `auto` may fall back to SSE when WebSocket setup fails before response streaming starts. A failure after events begin is surfaced instead of replaying the request over SSE. Use `sse` to disable WebSocket. Pi currently has no strict WebSocket-only option.
 
@@ -178,7 +181,9 @@ Each invocation switches Fast between on and off and writes the result to `~/.pi
 
 When Fast is effective, Pi's footer status line shows a yellow lowercase `fast` (set through the public `ctx.ui.setStatus` API; Pi's built-in footer is not modified). When Fast is off or the selected model is unsupported, no label is shown. Supported models do not produce a separate status notification. Running `/fast` with an unsupported model still updates the global preference; enabling it warns that the current model cannot use Fast.
 
-Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast injects `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level. When `models.dev` provides `experimental.modes.fast.cost`, the registered model cost switches to those Fast rates as well; the provider is refreshed when `/fast` is toggled. If no Fast price is published, the standard price is retained. The plugin does not guess Fast prices from `-pro`/`-fast` model IDs.
+Fast capability is catalog-driven: the plugin considers a CLIProxyAPI model Fast-capable when its `service_tiers` field is a non-empty array. The `additional_speed_tiers` field is ignored. For supported models, Fast passes Pi's native `serviceTier: "priority"` option to the stock Codex stream, which sends `service_tier: "priority"`; unsupported models are left unchanged. Fast is independent from pi's reasoning/thinking level.
+
+Models keep their standard catalog prices. Pi's Codex stream applies its built-in priority-tier multiplier to each request's usage cost (2×, or 2.5× for `gpt-5.5`), based on the tier the response reports. Toggling `/fast` therefore takes effect on the next request without refreshing the catalog or switching the active model. The multiplier matches OpenAI Codex pricing; it is not tailored to non-OpenAI backends behind CPA.
 
 ## Native web search (CLIProxyAPI v7.3.1+)
 
@@ -195,7 +200,7 @@ Enabling registers `cliproxyapi_search`. It takes `query` and an optional exact 
 
 The tool sends **only the query**, not conversation history, to `{root}/v1/responses` with the native `web_search` tool and `stream: false`. This keeps search results and citation URLs intact without modifying Pi's SSE/WebSocket parser. The result includes answer text, deduplicated HTTP(S) source URLs, and nested token usage. Results that report no completed search fail rather than masquerading as web results; incomplete answers are marked. Text is limited to 50KB/2000 lines, source details to 100 URLs, response bodies to 2 MiB, and each HTTP request to two minutes. Abort and `/pause` are honored. Normal chat transport is unchanged.
 
-This is an **additional model request** and may incur native search fees. Token costs use the model catalog rates; separate per-search charges are not included. Catalog-supported `/fast` applies to the search request too. The tool reuses Pi's resolved model credentials and headers; it does not store another API key.
+This is an **additional model request** and may incur native search fees. Token costs use the model catalog rates (with the same priority multiplier when Fast applies); separate per-search charges are not included. Catalog-supported `/fast` applies to the search request too. The tool reuses Pi's resolved model credentials and headers; it does not store another API key.
 
 `CLIPROXYAPI_WEB_SEARCH` overrides `webSearch` at startup. The command changes the current session and persisted preference; an environment override still wins on the next startup. Turning the tool off prevents new calls, but does not cancel an HTTP request already in progress.
 
@@ -227,35 +232,31 @@ Use `/continue` to clear the pause:
 
 Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every CLIProxyAPI request (other providers are not held), the extension rereads this setting. While paused and a CLIProxyAPI model is selected, the footer status line shows an orange `paused`. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
 
-## Model cache
+## Model catalog
 
-The provider keeps a separate cache file so startup stays fast when CLIProxyAPI is slow or briefly unreachable:
-
-`~/.pi/agent/cliproxyapi-models.json`
-
-The cache stores only model metadata and derived endpoint URLs — the model list, Fast-capable IDs, native-search-capable IDs, `modelsUrl`, and a `fetchedAt` timestamp. Legacy `client_version=pi` caches remain usable offline; capability discovery refreshes them using `client_version=cpa`. It **never** stores your API key or other credentials.
+The catalog follows Pi's native provider lifecycle. Pi persists what the provider publishes in its own model store (`~/.pi/agent/models-store.json`, entry `cliproxyapi`); the extension keeps no separate cache file. Each stored model carries a `cpa` field with its catalog capabilities (Fast, native search, SSE preference), so they are restored offline too. Credentials are never stored there.
 
 | Property | Value |
 |----------|-------|
-| Cache file | `~/.pi/agent/cliproxyapi-models.json` |
-| Remote query timeout | 60 seconds |
-| Scope | tied to the current `baseUrl` (a different base URL ignores the existing cache) |
+| Storage | Pi's model store, entry for the provider id |
+| Startup fetch timeout | 5 seconds |
+| Refresh timeout | 60 seconds |
+| Scope | models are restored only when their inference URL matches the configured `baseUrl` |
 
-### Startup / resume behavior
+### Startup behavior
 
-When the provider loads (including session resume):
+1. While the extension loads, it fetches `{root}/v1/models?client_version=cpa` once, bounded to 5 seconds. Pi resolves `--model` right after startup and never goes online first in print or JSON mode, so this is what makes `pi -p --model cliproxyapi/...` and subagent sessions work on a fresh install.
+2. Pi's offline startup refresh publishes and persists that result. If the fetch failed, Pi's stored catalog for the configured `baseUrl` is restored instead.
+3. Interactive and RPC modes then run Pi's network refresh. Shortly after startup it reuses the startup fetch rather than requesting the catalog again.
 
-1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=cpa` then runs in the background. A non-empty catalog replaces the cache, so a removed model disappears immediately. An empty catalog, invalid JSON, or a body with no model list leaves the existing cache active. If the query fails, the existing cache also remains active.
-2. If no matching cache exists, the remote query runs synchronously. On success, the cache is written and the fetched models are registered. If it fails, startup logs a warning and no models are registered until the proxy responds.
-
-Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog. The provider also exposes Pi's native `refreshModels` lifecycle, so runtime-wide model refreshes use the same remote catalog and cache path.
+A non-empty catalog replaces the stored list, so a removed model disappears immediately. An empty catalog does not erase a populated one; invalid JSON or a body with no model list fails the refresh and leaves the stored list active.
 
 ### Refresh commands
 
-- `/cliproxyapi-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi. A non-empty catalog replaces the previous list. An empty catalog does not erase a populated cache; delete `cliproxyapi-models.json` if the proxy really has no models.
-- `/login CLIProxyAPI` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
+- `/cliproxyapi-refresh` forces an immediate refresh through Pi's model registry (`refresh({ providers: [id], force: true })`). Use it after adding or removing models on the proxy.
+- `/login CLIProxyAPI` / `/login cliproxyapi` validates the credentials, then Pi refreshes this provider's catalog.
 
-Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
+Older versions kept their own cache in `~/.pi/agent/cliproxyapi-models.json`. It is no longer read and can be deleted.
 
 ## Model mapping
 
@@ -304,9 +305,9 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 
 - CLIProxyAPI `closed network connection` responses are normalized as transient network errors so pi's agent-level retry policy reconnects and restarts the interrupted assistant turn. Completed conversation and tool results remain available; token streaming does not resume from the exact interruption point.
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
-- After successful `/login`: models are registered and native API-key credentials are stored only in `auth.json`.
+- After successful `/login`: native API-key credentials are stored only in `auth.json`, and Pi refreshes the catalog.
 - The built-in `/logout` command removes the matching `auth.json` credential; environment variables and non-secret `cliproxyapi.json` settings are unchanged.
-- If a models request returns **HTTP 401** or CPA is unreachable during startup, an existing matching cache remains in use while the background refresh fails. Only when no cache is available is a warning logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
+- If a models request returns **HTTP 401** or CPA is unreachable during startup, a warning is logged and Pi's stored catalog for the configured `baseUrl` remains in use. Without a stored catalog, no models are listed until a refresh succeeds; reconfigure via `/login CLIProxyAPI` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key

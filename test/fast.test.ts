@@ -6,13 +6,11 @@ import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
-	applyFastPayloadHook,
 	CLIPROXYAPI_CODEX_API,
 	type CliproxyCodexStreamSimple,
-	withPriorityServiceTier,
-	wrapCodexStreamForFast,
+	resolveCliproxyTransport,
+	toFastCodexOptions,
 	wrapCodexStreamForTransport,
-	wrapStreamSimpleForFast,
 	wrapStreamSimpleForTransport,
 } from "../extensions/codex-stream.ts";
 import { FastModeController } from "../extensions/fast.ts";
@@ -120,7 +118,7 @@ describe("provider status line", () => {
 });
 
 describe("Fast catalog mapping", () => {
-	it("returns the model ids that advertise Fast", async () => {
+	it("marks the models that advertise Fast", async () => {
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			new Response(
 				JSON.stringify({
@@ -135,29 +133,25 @@ describe("Fast catalog mapping", () => {
 			),
 		);
 
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
 		try {
-			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key", false, agentDir);
-			expect(loaded.fastModelIds).toEqual(["gpt-5.4", "gpt-5.5"]);
-			expect(loaded.models.map((entry) => entry.id)).toEqual([
-				"gpt-5.4",
-				"gpt-5.5",
-				"speed-tier-only",
-				"custom-model",
+			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key");
+			expect(loaded.models.map((entry) => [entry.id, entry.cpa?.fast ?? false])).toEqual([
+				["gpt-5.4", true],
+				["gpt-5.5", true],
+				["speed-tier-only", false],
+				["custom-model", false],
 			]);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
 			expect(fetchMock).toHaveBeenCalledWith(
 				"http://127.0.0.1:8317/v1/models?client_version=cpa",
 				expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer test-key" }) }),
 			);
 		} finally {
 			fetchMock.mockRestore();
-			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
-});
 
-describe("Fast pricing mapping", () => {
-	it("uses models.dev standard and experimental Fast prices when loading CPA models", async () => {
+	it("keeps standard pricing regardless of Fast; Pi applies the tier multiplier per request", async () => {
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 			if (String(input).startsWith("https://models.dev/")) {
 				return new Response(
@@ -165,48 +159,22 @@ describe("Fast pricing mapping", () => {
 						openai: {
 							models: {
 								"gpt-5.6-sol": {
-									cost: {
-										input: 5,
-										output: 30,
-										cache_read: 0.5,
-										cache_write: 6.25,
-									},
-									experimental: {
-										modes: {
-											fast: { cost: { input: 10, output: 60, cache_read: 1, cache_write: 12.5 } },
-										},
-									},
+									cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 },
+									experimental: { modes: { fast: { cost: { input: 10, output: 60 } } } },
 								},
 							},
 						},
 					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
 			}
 			return new Response(
-				JSON.stringify({
-					models: [{ slug: "gpt-5.6-sol", service_tiers: [{ id: "priority" }] }],
-				}),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
+				JSON.stringify({ models: [{ slug: "gpt-5.6-sol", service_tiers: [{ id: "priority" }] }] }),
 			);
 		});
-
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
 		try {
-			const standard = await loadMappedModels("http://127.0.0.1:8317", "test-key", false, agentDir);
-			const fast = await loadMappedModels("http://127.0.0.1:8317", "test-key", true, agentDir);
-			expect(standard.models[0]?.cost).toEqual({
-				input: 5,
-				output: 30,
-				cacheRead: 0.5,
-				cacheWrite: 6.25,
-			});
-			expect(fast.models[0]?.cost).toEqual({
-				input: 10,
-				output: 60,
-				cacheRead: 1,
-				cacheWrite: 12.5,
-			});
+			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key", { agentDir });
+			expect(loaded.models[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
 		} finally {
 			fetchMock.mockRestore();
 			rmSync(agentDir, { recursive: true, force: true });
@@ -214,29 +182,46 @@ describe("Fast pricing mapping", () => {
 	});
 });
 
-describe("Codex transport wrapper", () => {
-	it("forces the configured transport while preserving other options", () => {
+describe("Codex transport selection", () => {
+	it("honors an explicit Pi transport setting", () => {
+		expect(resolveCliproxyTransport({ transport: "websocket-cached" }, true)).toBe("websocket-cached");
+		expect(resolveCliproxyTransport({ transport: "sse" }, false)).toBe("sse");
+	});
+
+	it("uses the catalog preference for Pi's default auto transport", () => {
+		expect(resolveCliproxyTransport({ transport: "auto" }, false)).toBe("websocket");
+		expect(resolveCliproxyTransport({ transport: "auto" }, true)).toBe("sse");
+		expect(resolveCliproxyTransport(undefined, false)).toBe("websocket");
+	});
+
+	it("uses SSE for standalone no-cache requests", () => {
+		expect(resolveCliproxyTransport({ cacheRetention: "none", transport: "websocket" }, false)).toBe("sse");
+	});
+
+	it("applies the resolved transport while preserving other options", () => {
 		let captured: SimpleStreamOptions | undefined;
 		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
-			captured = options;
-			return streamResult;
-		};
-		const wrapped = wrapStreamSimpleForTransport(baseStream, "sse");
+		const wrapped = wrapStreamSimpleForTransport(
+			(_model, _context, options) => {
+				captured = options;
+				return streamResult;
+			},
+			(target, options) => resolveCliproxyTransport(options, target.id === "claude-backed"),
+		);
 
-		expect(wrapped(model, { messages: [] }, { timeoutMs: 1234, transport: "websocket" })).toBe(streamResult);
+		expect(wrapped({ ...model, id: "claude-backed" }, { messages: [] }, { timeoutMs: 1234 })).toBe(streamResult);
 		expect(captured).toEqual({ timeoutMs: 1234, transport: "sse" });
 	});
 
 	it("preserves API-specific options on the full stream contract", () => {
 		let captured: unknown;
 		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const wrapped = wrapCodexStreamForFast(
-			wrapCodexStreamForTransport((_model, _context, options) => {
+		const wrapped = wrapCodexStreamForTransport(
+			(_model, _context, options) => {
 				captured = options;
 				return streamResult;
-			}, "websocket"),
-			() => true,
+			},
+			() => "websocket",
 		);
 
 		const fullStreamModel = { ...model, api: CLIPROXYAPI_CODEX_API } as Model<typeof CLIPROXYAPI_CODEX_API>;
@@ -252,108 +237,44 @@ describe("Codex transport wrapper", () => {
 			serviceTier: "default",
 			textVerbosity: "high",
 			transport: "websocket",
-			onPayload: expect.any(Function),
 		});
-	});
-
-	it("resolves a per-model transport when none is configured", () => {
-		const seen: Array<string | undefined> = [];
-		const wrapped = wrapStreamSimpleForTransport(
-			(_model, _context, options) => {
-				seen.push(options?.transport);
-				return {} as ReturnType<CliproxyCodexStreamSimple>;
-			},
-			(target) => (target.id === "claude-backed" ? "sse" : "websocket"),
-		);
-
-		wrapped({ ...model, id: "claude-backed" }, { messages: [] }, {});
-		wrapped(model, { messages: [] }, {});
-		expect(seen).toEqual(["sse", "websocket"]);
-	});
-
-	it("uses SSE for standalone no-cache requests", () => {
-		let captured: SimpleStreamOptions | undefined;
-		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const wrapped = wrapStreamSimpleForTransport((_model, _context, options) => {
-			captured = options;
-			return streamResult;
-		}, "websocket");
-
-		expect(wrapped(model, { messages: [] }, { cacheRetention: "none", sessionId: "summary" })).toBe(streamResult);
-		expect(captured).toMatchObject({ cacheRetention: "none", sessionId: "summary", transport: "sse" });
 	});
 });
 
-describe("Fast stream wrapper", () => {
-	it("passes options through unchanged when Fast is not effective", () => {
-		let captured: SimpleStreamOptions | undefined;
-		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
-			captured = options;
-			return streamResult;
-		};
-		const wrapped = wrapStreamSimpleForFast(baseStream, () => false);
-		const options: SimpleStreamOptions = { timeoutMs: 1234 };
+describe("Fast stream options", () => {
+	const reasoningModel = {
+		...model,
+		reasoning: true,
+		maxTokens: 16384,
+		contextWindow: 128000,
+		thinkingLevelMap: { off: "none", low: "low", high: "high" },
+	} as unknown as Model<Api>;
 
-		expect(wrapped(model, { messages: [] }, options)).toBe(streamResult);
-		expect(captured).toBe(options);
-	});
-
-	it("preserves stream options and composes the Fast payload hook when enabled", async () => {
-		let captured: SimpleStreamOptions | undefined;
-		let observed: unknown;
-		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
-			captured = options;
-			return streamResult;
-		};
-		const wrapped = wrapStreamSimpleForFast(baseStream, () => true);
-		const options: SimpleStreamOptions = {
+	it("mirrors stock simple options on the full stream and requests the priority tier", () => {
+		const onPayload = vi.fn();
+		const options = toFastCodexOptions(reasoningModel, {
+			apiKey: "key",
+			sessionId: "session",
 			timeoutMs: 1234,
-			onPayload: (payload) => {
-				observed = payload;
-				return undefined;
-			},
-		};
-
-		expect(wrapped(model, { messages: [] }, options)).toBe(streamResult);
-		expect(captured?.timeoutMs).toBe(1234);
-		expect(captured).not.toBe(options);
-		const shaped = await captured?.onPayload?.({ model: "gpt-5.4" }, model);
-		expect(observed).toEqual({ model: "gpt-5.4", service_tier: "priority" });
-		expect(shaped).toEqual({ model: "gpt-5.4", service_tier: "priority" });
-	});
-});
-
-describe("Fast payload shaping", () => {
-	it("adds priority without mutating the original payload", () => {
-		const original = { model: "gpt-5.4", service_tier: "default" };
-		const shaped = withPriorityServiceTier(original);
-
-		expect(shaped).toEqual({ model: "gpt-5.4", service_tier: "priority" });
-		expect(original).toEqual({ model: "gpt-5.4", service_tier: "default" });
-	});
-
-	it("leaves non-object payloads unchanged", () => {
-		const arrayPayload: unknown[] = [];
-		expect(withPriorityServiceTier(null)).toBeNull();
-		expect(withPriorityServiceTier("payload")).toBe("payload");
-		expect(withPriorityServiceTier(arrayPayload)).toBe(arrayPayload);
-	});
-
-	it("lets pi payload hooks inspect and override the injected tier", async () => {
-		let observed: unknown;
-		const result = await applyFastPayloadHook({ model: "gpt-5.4" }, model, (payload) => {
-			observed = payload;
-			return { ...(payload as Record<string, unknown>), service_tier: "default" };
+			reasoning: "high",
+			onPayload,
 		});
-
-		expect(observed).toEqual({ model: "gpt-5.4", service_tier: "priority" });
-		expect(result).toEqual({ model: "gpt-5.4", service_tier: "default" });
+		expect(options).toMatchObject({
+			apiKey: "key",
+			sessionId: "session",
+			timeoutMs: 1234,
+			reasoningEffort: "high",
+			serviceTier: "priority",
+			onPayload,
+		});
 	});
 
-	it("keeps priority when later payload hooks return undefined", async () => {
-		const result = await applyFastPayloadHook({ model: "gpt-5.4" }, model, () => undefined);
-		expect(result).toEqual({ model: "gpt-5.4", service_tier: "priority" });
+	it("does not send a reasoning effort when thinking is off", () => {
+		const options = toFastCodexOptions(reasoningModel, {
+			apiKey: "key",
+			reasoning: "off" as SimpleStreamOptions["reasoning"],
+		});
+		expect(options.reasoningEffort).toBeUndefined();
+		expect(options.serviceTier).toBe("priority");
 	});
 });

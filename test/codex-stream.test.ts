@@ -74,7 +74,8 @@ function completedEvent(id: string, output: unknown[] = []) {
 function decodeJwtPayload(token: string): Record<string, any> {
 	const payload = token.split(".")[1];
 	if (!payload) throw new Error("JWT payload is missing");
-	return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, any>;
+	// Decode exactly like Pi's extractAccountId: atob() on the raw base64url segment.
+	return JSON.parse(atob(payload)) as Record<string, any>;
 }
 
 function toHeaders(headers?: ProviderHeaders): Headers {

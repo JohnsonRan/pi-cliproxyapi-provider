@@ -380,10 +380,23 @@ export function registerPauseCommands(options: {
 	});
 }
 
-export function registerPauseGuard(options: { pi: ExtensionAPI; agentDir: string; pauseMode: PauseController }): void {
-	const { pi, agentDir, pauseMode } = options;
+export function registerPauseGuard(options: {
+	pi: ExtensionAPI;
+	agentDir: string;
+	providerId: string;
+	pauseMode: PauseController;
+}): void {
+	const { pi, agentDir, providerId, pauseMode } = options;
 	pi.on("before_provider_request", async (_event, ctx) => {
-		await waitForPauseToEnd(agentDir, pauseMode, ctx.signal);
+		// This event fires for every provider; only gate CLIProxyAPI requests.
+		if (ctx.model?.provider !== providerId) return;
+		try {
+			await waitForPauseToEnd(agentDir, pauseMode, ctx.signal);
+		} catch (error) {
+			// Esc while paused aborts the request itself; do not surface it as an extension error.
+			if (ctx.signal?.aborted) return;
+			throw error;
+		}
 	});
 }
 
@@ -521,7 +534,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	}
 	pauseController.setEnabled(pauseEnabled);
 	registerPauseCommands({ pi, agentDir, pauseMode: pauseController });
-	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
+	registerPauseGuard({ pi, agentDir, providerId: identity.providerId, pauseMode: pauseController });
 
 	const hierarchy = new SessionHierarchy();
 	hierarchy.register(pi);

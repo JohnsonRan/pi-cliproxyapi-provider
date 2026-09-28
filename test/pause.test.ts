@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { registerPauseCommands } from "../extensions/index.ts";
+import { registerPauseCommands, registerPauseGuard } from "../extensions/index.ts";
 import { loadConfigFile, resolvePauseDefault, saveConfigFile } from "../extensions/lib.ts";
 import { PAUSE_POLL_INTERVAL_MS, PauseController, pauseController, waitForPauseToEnd } from "../extensions/pause.ts";
 import tpsExtension from "../extensions/tps.ts";
@@ -114,6 +114,41 @@ describe("pause commands", () => {
 		expect(loadConfigFile(agentDir)).toEqual({ pause: false });
 		expect(notify).toHaveBeenNthCalledWith(1, "Requests are paused.", "info");
 		expect(notify).toHaveBeenNthCalledWith(2, "Requests are continued.", "info");
+	});
+});
+
+describe("pause guard", () => {
+	function setupGuard() {
+		const agentDir = tempAgentDir();
+		saveConfigFile(agentDir, { pause: true });
+		let guard: ((event: unknown, ctx: ExtensionContext) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((_event: string, handler: typeof guard) => {
+				guard = handler;
+			}),
+		} as unknown as ExtensionAPI;
+		registerPauseGuard({ pi, agentDir, providerId: "cliproxyapi", pauseMode: new PauseController(true) });
+		return { agentDir, guard: guard! };
+	}
+
+	it("does not hold requests for other providers", async () => {
+		const { guard } = setupGuard();
+		const ctx = { model: { provider: "anthropic" }, signal: undefined } as unknown as ExtensionContext;
+		await expect(guard({}, ctx)).resolves.toBeUndefined();
+	});
+
+	it("holds CLIProxyAPI requests and ends quietly when aborted", async () => {
+		const { guard } = setupGuard();
+		const controller = new AbortController();
+		const ctx = { model: { provider: "cliproxyapi" }, signal: controller.signal } as unknown as ExtensionContext;
+		let settled = false;
+		const waiting = guard({}, ctx).finally(() => {
+			settled = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, PAUSE_POLL_INTERVAL_MS / 2));
+		expect(settled).toBe(false);
+		controller.abort();
+		await expect(waiting).resolves.toBeUndefined();
 	});
 });
 

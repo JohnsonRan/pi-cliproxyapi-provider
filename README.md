@@ -226,7 +226,7 @@ Use `/continue` to clear the pause:
 /continue
 ```
 
-Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
+Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every CLIProxyAPI request (other providers are not held), the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
 
 ## Model cache
 

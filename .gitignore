@@ -11,3 +11,6 @@ test-output
 # Local publish helper (not committed)
 Makefile
 .publish.mjs
+
+# Local Pi agent state
+.pi/

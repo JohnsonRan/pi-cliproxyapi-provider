@@ -341,6 +341,21 @@ describe("Codex transport wrapper", () => {
 		});
 	});
 
+	it("resolves a per-model transport when none is configured", () => {
+		const seen: Array<string | undefined> = [];
+		const wrapped = wrapStreamSimpleForTransport(
+			(_model, _context, options) => {
+				seen.push(options?.transport);
+				return {} as ReturnType<CliproxyCodexStreamSimple>;
+			},
+			(target) => (target.id === "claude-backed" ? "sse" : "websocket"),
+		);
+
+		wrapped({ ...model, id: "claude-backed" }, { messages: [] }, {});
+		wrapped(model, { messages: [] }, {});
+		expect(seen).toEqual(["sse", "websocket"]);
+	});
+
 	it("uses SSE for standalone no-cache requests", () => {
 		let captured: SimpleStreamOptions | undefined;
 		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;

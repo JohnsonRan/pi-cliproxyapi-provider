@@ -29,7 +29,7 @@ import {
 	resolveEndpoints,
 	resolveFastDefault,
 	resolveIdentity,
-	resolveTransportDefault,
+	resolveTransportSetting,
 	resolveUseMaxContextWindow,
 	resolveWebSearchDefault,
 	saveConfigFile,
@@ -601,13 +601,14 @@ describe("config and auth file helpers", () => {
 		const previous = process.env.CLIPROXYAPI_TRANSPORT;
 		try {
 			delete process.env.CLIPROXYAPI_TRANSPORT;
-			expect(resolveTransportDefault(agentDir)).toBe("auto");
+			expect(resolveTransportSetting(tempAgentDir())).toBeUndefined();
+			expect(resolveTransportSetting(agentDir)).toBe("auto");
 			process.env.CLIPROXYAPI_TRANSPORT = "websocket-cached";
-			expect(resolveTransportDefault(agentDir)).toBe("websocket-cached");
+			expect(resolveTransportSetting(agentDir)).toBe("websocket-cached");
 			process.env.CLIPROXYAPI_TRANSPORT = "sse";
-			expect(resolveTransportDefault(agentDir)).toBe("sse");
+			expect(resolveTransportSetting(agentDir)).toBe("sse");
 			process.env.CLIPROXYAPI_TRANSPORT = "invalid";
-			expect(() => resolveTransportDefault(agentDir)).toThrow(/websocket, websocket-cached, auto, sse/);
+			expect(() => resolveTransportSetting(agentDir)).toThrow(/websocket, websocket-cached, auto, sse/);
 		} finally {
 			if (previous === undefined) {
 				delete process.env.CLIPROXYAPI_TRANSPORT;

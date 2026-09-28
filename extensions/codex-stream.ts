@@ -46,8 +46,13 @@ export type CliproxyCodexStreams = {
 export interface CliproxyCodexStreamOptions {
 	shouldUseFast?: (model: Model<Api>) => boolean;
 	getSessionHeaders?: (options?: StreamOptions) => ProviderHeaders;
+	/** Explicit user transport; overrides the per-model catalog preference. */
 	transport?: CliproxyTransport;
+	/** Catalog says prefer_websockets=false for this model. */
+	prefersSse?: (model: Model<Api>) => boolean;
 }
+
+type TransportChoice = CliproxyTransport | ((model: Model<Api>) => CliproxyTransport);
 
 type PayloadHook = NonNullable<SimpleStreamOptions["onPayload"]>;
 
@@ -124,25 +129,30 @@ export function wrapCodexStreamForCliproxyAuth(stream: CliproxyCodexStream): Cli
 
 function wrapStreamForTransport<TOptions extends StreamOptions>(
 	stream: CliproxyCodexStreamFunction<TOptions>,
-	transport: CliproxyTransport,
+	transport: TransportChoice,
 ): CliproxyCodexStreamFunction<TOptions> {
 	return (model, context, streamOptions) =>
 		stream(model, context, {
 			...streamOptions,
-			transport: streamOptions?.cacheRetention === "none" ? "sse" : transport,
+			transport:
+				streamOptions?.cacheRetention === "none"
+					? "sse"
+					: typeof transport === "function"
+						? transport(model)
+						: transport,
 		} as TOptions);
 }
 
 export function wrapStreamSimpleForTransport(
 	streamSimple: CliproxyCodexStreamSimple,
-	transport: CliproxyTransport,
+	transport: TransportChoice,
 ): CliproxyCodexStreamSimple {
 	return wrapStreamForTransport(streamSimple, transport);
 }
 
 export function wrapCodexStreamForTransport(
 	stream: CliproxyCodexStream,
-	transport: CliproxyTransport,
+	transport: TransportChoice,
 ): CliproxyCodexStream {
 	return wrapStreamForTransport(
 		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
@@ -203,7 +213,8 @@ function wrapStreamForSession<TOptions extends StreamOptions>(
 
 export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {}): CliproxyCodexStreams {
 	const stock = openAICodexResponsesApi();
-	const transport = options.transport ?? "websocket";
+	const transport: TransportChoice =
+		options.transport ?? ((model) => (options.prefersSse?.(model) ? "sse" : "websocket"));
 	const stockStreamSimple = wrapStreamForSession(
 		stock.streamSimple as CliproxyCodexStreamSimple,
 		options.getSessionHeaders,

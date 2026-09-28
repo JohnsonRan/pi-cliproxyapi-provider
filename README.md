@@ -9,7 +9,7 @@ Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-
 - uses Pi's native API-key login and stores credentials only in `auth.json`;
 - standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
 - uses Pi's public stock `openai-codex-responses` stream without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
-- adds configurable `websocket`, `websocket-cached`, `auto`, and `sse` transports, with persistent WebSocket as the default;
+- adds configurable `websocket`, `websocket-cached`, `auto`, and `sse` transports, defaulting to persistent WebSocket, or SSE for models the CPA catalog marks `prefer_websockets: false`;
 - resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
 - improves catalog mapping with native model refresh, opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
 
@@ -96,7 +96,6 @@ You can still configure without `/login`.
   "fast": false,
   "webSearch": false,
   "pause": false,
-  "transport": "websocket",
   "useMaxContextWindow": false
 }
 ```
@@ -112,7 +111,7 @@ Optional fields:
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
 | `webSearch` | `false` | Enable the `cliproxyapi_search` tool for models with explicit native search support |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
-| `transport` | `websocket` | Request transport: persistent full-context `websocket`, persistent incremental-context `websocket-cached`, stock automatic `auto`, or `sse` |
+| `transport` | _(per model)_ | Unset: `websocket`, or `sse` for models the catalog marks `prefer_websockets: false` (CPA does this for non-Codex backends). Set explicitly to force one request transport for every model: persistent full-context `websocket`, persistent incremental-context `websocket-cached`, stock automatic `auto`, or `sse` |
 | `useMaxContextWindow` | `false` | Use catalog `max_context_window` instead of standard `context_window` when available |
 
 ### Environment overrides
@@ -136,7 +135,7 @@ Resolution order for connection settings:
 3. `cliproxyapi.json`
 4. Default baseUrl `http://127.0.0.1:8317`
 
-The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`. Transport resolves as `CLIPROXYAPI_TRANSPORT` → `cliproxyapi.json` → `websocket`. Maximum context is opt-in via `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` → `cliproxyapi.json` → `false`.
+The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`. Transport resolves as `CLIPROXYAPI_TRANSPORT` → `cliproxyapi.json` → per-model catalog default (`websocket` unless `prefer_websockets: false`). Maximum context is opt-in via `CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW` → `cliproxyapi.json` → `false`.
 
 Pi's stock Codex transport behavior applies: `websocket`, `websocket-cached`, and `auto` may fall back to SSE when WebSocket setup fails before response streaming starts. A failure after events begin is surfaced instead of replaying the request over SSE. Use `sse` to disable WebSocket. Pi currently has no strict WebSocket-only option.
 

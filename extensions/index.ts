@@ -49,7 +49,7 @@ import {
 	resolveIdentity,
 	resolveMappedModels,
 	resolvePauseDefault,
-	resolveTransportDefault,
+	resolveTransportSetting,
 	resolveUseMaxContextWindow,
 	resolveWebSearchDefault,
 	saveConfigFile,
@@ -90,16 +90,27 @@ function logInfo(message: string): void {
 	console.info(`[pi-cliproxyapi-provider] ${message}`);
 }
 
+/** Catalog-derived per-model capabilities shared by streams, tools, and commands. */
+interface ModelCapabilities {
+	webSearch: Set<string>;
+	sse: Set<string>;
+}
+
+function replaceIds(target: Set<string>, ids: string[] | undefined): void {
+	target.clear();
+	for (const id of ids ?? []) {
+		if (typeof id === "string" && id.trim()) target.add(id.trim());
+	}
+}
+
 function setModelCapabilities(
 	fastMode: FastModeController,
-	webSearchModelIds: Set<string>,
+	capabilities: ModelCapabilities,
 	loaded: MappedModels,
 ): void {
 	fastMode.setSupportedModelIds(loaded.fastModelIds);
-	webSearchModelIds.clear();
-	for (const id of loaded.webSearchModelIds ?? []) {
-		if (typeof id === "string" && id.trim()) webSearchModelIds.add(id.trim());
-	}
+	replaceIds(capabilities.webSearch, loaded.webSearchModelIds);
+	replaceIds(capabilities.sse, loaded.sseModelIds);
 }
 
 function useMaxContextWindow(agentDir: string): boolean {
@@ -145,7 +156,7 @@ function registerProvider(
 		stream: CliproxyCodexStream;
 		streamSimple: CliproxyCodexStreamSimple;
 		fastMode: FastModeController;
-		webSearchModelIds: Set<string>;
+		capabilities: ModelCapabilities;
 		refreshCoordinator: ModelRefreshCoordinator;
 	},
 ): void {
@@ -158,7 +169,7 @@ function registerProvider(
 		stream,
 		streamSimple,
 		fastMode,
-		webSearchModelIds,
+		capabilities,
 		refreshCoordinator,
 	} = options;
 	const inferenceBaseUrl = resolveEndpoints(baseUrlInput).inferenceBaseUrl;
@@ -241,7 +252,7 @@ function registerProvider(
 					throw new Error("Model refresh was superseded by a newer request.");
 				}
 				currentModels = bindModels(loaded.models, resolveEndpoints(baseUrl).inferenceBaseUrl);
-				setModelCapabilities(fastMode, webSearchModelIds, loaded);
+				setModelCapabilities(fastMode, capabilities, loaded);
 				const credential: ApiKeyCredential = {
 					type: "api_key",
 					key: apiKey,
@@ -327,7 +338,7 @@ function registerProvider(
 				update: () => {
 					if (!refreshCoordinator.isCurrent(refresh.generation)) return;
 					currentModels = nextModels;
-					setModelCapabilities(fastMode, webSearchModelIds, loaded);
+					setModelCapabilities(fastMode, capabilities, loaded);
 				},
 			});
 		},
@@ -549,7 +560,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logWarn(`invalid Fast configuration (${message}); using fast=false`);
 	}
 	const fastMode = new FastModeController(fastEnabled);
-	const webSearchModelIds = new Set<string>();
+	const capabilities: ModelCapabilities = { webSearch: new Set(), sse: new Set() };
 	let webSearchEnabled = false;
 	try {
 		webSearchEnabled = resolveWebSearchDefault(agentDir);
@@ -563,18 +574,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	let stream: CliproxyCodexStream;
 	let streamSimple: CliproxyCodexStreamSimple;
 	try {
-		let transport: ReturnType<typeof resolveTransportDefault>;
+		let transport: ReturnType<typeof resolveTransportSetting>;
 		try {
-			transport = resolveTransportDefault(agentDir);
+			transport = resolveTransportSetting(agentDir);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			logWarn(`invalid transport configuration (${message}); using websocket`);
-			transport = "websocket";
+			logWarn(`invalid transport configuration (${message}); using catalog default`);
+			transport = undefined;
 		}
 		const streams = loadCliproxyCodexStreams({
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 			getSessionHeaders: (options) => hierarchy.headers(options),
 			transport,
+			prefersSse: (model) => model.provider === identity.providerId && capabilities.sse.has(model.id),
 		});
 		stream = streams.stream;
 		streamSimple = streams.streamSimple;
@@ -589,7 +601,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		agentDir,
 		providerId: identity.providerId,
 		enabled: webSearchEnabled,
-		isSupported: (id) => webSearchModelIds.has(id),
+		isSupported: (id) => capabilities.webSearch.has(id),
 		shouldUseFast: (id) => fastMode.isEffectiveFor(id),
 		hierarchy,
 	});
@@ -618,7 +630,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		stream,
 		streamSimple,
 		fastMode,
-		webSearchModelIds,
+		capabilities,
 		refreshCoordinator: modelRefreshCoordinator,
 	});
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
@@ -644,7 +656,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			);
 			if (!modelRefreshCoordinator.isCurrent(refresh.generation)) return undefined;
 
-			setModelCapabilities(fastMode, webSearchModelIds, loaded);
+			setModelCapabilities(fastMode, capabilities, loaded);
 
 			registerProvider(pi, {
 				providerId: identity.providerId,
@@ -655,7 +667,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				stream,
 				streamSimple,
 				fastMode,
-				webSearchModelIds,
+				capabilities,
 				refreshCoordinator: modelRefreshCoordinator,
 			});
 

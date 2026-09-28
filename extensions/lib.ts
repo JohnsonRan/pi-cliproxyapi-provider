@@ -90,6 +90,7 @@ export interface CodexClientModel {
 	service_tiers?: Array<CodexServiceTier | string>;
 	additional_speed_tiers?: string[];
 	apply_patch_tool_type?: string;
+	prefer_websockets?: boolean;
 	visibility?: string;
 	cpa_capabilities?: { web_search?: boolean };
 }
@@ -135,6 +136,8 @@ export interface MappedModels {
 	fastModelIds: string[];
 	/** Only explicit true capability claims; absent on older caches. */
 	webSearchModelIds?: string[];
+	/** Models CPA marks prefer_websockets=false (non-Codex backends); absent on older caches. */
+	sseModelIds?: string[];
 	modelsUrl: string;
 	fastMode?: boolean;
 	useMaxContextWindow?: boolean;
@@ -415,9 +418,13 @@ export function resolveUseMaxContextWindow(agentDir: string): boolean {
 	return value;
 }
 
-/** Resolve Codex transport from env/config, defaulting to persistent WebSocket. */
-export function resolveTransportDefault(agentDir: string): CliproxyTransport {
-	const value = firstNonEmpty(process.env.CLIPROXYAPI_TRANSPORT) ?? loadConfigFile(agentDir).transport ?? "websocket";
+/**
+ * Resolve an explicit Codex transport from env/config. Undefined means per-model:
+ * persistent WebSocket, or SSE where the CPA catalog sets prefer_websockets=false.
+ */
+export function resolveTransportSetting(agentDir: string): CliproxyTransport | undefined {
+	const value = firstNonEmpty(process.env.CLIPROXYAPI_TRANSPORT) ?? loadConfigFile(agentDir).transport;
+	if (value === undefined) return undefined;
 	if (value === "websocket" || value === "websocket-cached" || value === "auto" || value === "sse") return value;
 	throw new Error(`CLIProxyAPI transport must be one of: websocket, websocket-cached, auto, sse`);
 }
@@ -983,6 +990,14 @@ export async function loadMappedModels(
 							model.cpa_capabilities?.web_search === true &&
 							String(model.visibility ?? "").toLowerCase() !== "hide",
 					)
+					.map(codexModelId)
+					.filter(Boolean),
+			),
+		),
+		sseModelIds: Array.from(
+			new Set(
+				remoteModels
+					.filter((model) => model.prefer_websockets === false)
 					.map(codexModelId)
 					.filter(Boolean),
 			),

@@ -190,6 +190,29 @@ describe("models cache helpers", () => {
 		}
 	});
 
+	it("caches models that CPA marks prefer_websockets=false", async () => {
+		const dir = tempAgentDir();
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					models: [
+						{ slug: "codex", prefer_websockets: true },
+						{ slug: "claude", prefer_websockets: false },
+						{ slug: "unknown" },
+					],
+				}),
+				{ status: 200 },
+			),
+		);
+		try {
+			const { loaded } = await resolveMappedModels(dir, "http://127.0.0.1:8317", "key");
+			expect(loaded.sseModelIds).toEqual(["claude"]);
+			expect(loadModelsCache(dir, "http://127.0.0.1:8317")?.sseModelIds).toEqual(["claude"]);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
 	it("returns null when the cache file is missing", () => {
 		const agentDir = tempAgentDir();
 		expect(loadModelsCache(agentDir, "http://127.0.0.1:8317")).toBeNull();

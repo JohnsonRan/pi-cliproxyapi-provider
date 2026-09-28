@@ -312,7 +312,7 @@ function registerProvider(
 			);
 			if (!connection) return;
 			const refresh = refreshCoordinator.begin();
-			const signal = context.signal ? AbortSignal.any([context.signal, refresh.signal]) : refresh.signal;
+			const signal = AbortSignal.any([context.signal, refresh.signal]);
 			const { loaded } = await resolveMappedModels(agentDir, connection.baseUrl, connection.apiKey, {
 				forceRefresh: true,
 				fastMode: fastMode.isEnabled(),
@@ -320,9 +320,16 @@ function registerProvider(
 				signal,
 				shouldCommit: () => refreshCoordinator.isCurrent(refresh.generation),
 			});
-			if (!refreshCoordinator.isCurrent(refresh.generation)) return;
-			currentModels = bindModels(loaded.models, resolveEndpoints(connection.baseUrl).inferenceBaseUrl);
-			setModelCapabilities(fastMode, webSearchModelIds, loaded);
+			if (signal.aborted || !refreshCoordinator.isCurrent(refresh.generation)) return;
+			const nextModels = bindModels(loaded.models, resolveEndpoints(connection.baseUrl).inferenceBaseUrl);
+			// Pi >=0.84 guards provider state by generation; mutate only inside publish().
+			await context.publish({
+				update: () => {
+					if (!refreshCoordinator.isCurrent(refresh.generation)) return;
+					currentModels = nextModels;
+					setModelCapabilities(fastMode, webSearchModelIds, loaded);
+				},
+			});
 		},
 		stream,
 		streamSimple,

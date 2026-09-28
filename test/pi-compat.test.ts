@@ -25,6 +25,21 @@ const CLIPROXYAPI_ENV_NAMES = [
 	"CLIPROXYAPI_USE_MAX_CONTEXT_WINDOW",
 ] as const;
 
+type RefreshContext = Parameters<NonNullable<Provider["refreshModels"]>>[0];
+
+/** Mirror Pi's RefreshModelsContext: publish runs update() unless the generation is stale. */
+function refreshContext(overrides: Partial<RefreshContext> = {}, accepted = true): RefreshContext {
+	return {
+		allowNetwork: true,
+		signal: new AbortController().signal,
+		publish: vi.fn(async (publication: { update?: () => void }) => {
+			if (accepted) publication.update?.();
+			return accepted;
+		}),
+		...overrides,
+	} as RefreshContext;
+}
+
 function loadStoredAuth(agentDir: string): unknown {
 	const auth = JSON.parse(readFileSync(join(agentDir, AUTH_FILE_NAME), "utf8")) as Record<string, unknown>;
 	return auth.cliproxyapi;
@@ -395,7 +410,7 @@ describe("Pi native provider compatibility", () => {
 						}>;
 					};
 				};
-				refreshModels?: (context: { allowNetwork: boolean; credential?: unknown }) => Promise<void>;
+				refreshModels?: (context: RefreshContext) => Promise<void>;
 			};
 			const credential = {
 				type: "api_key",
@@ -422,10 +437,11 @@ describe("Pi native provider compatibility", () => {
 				});
 
 				// Pi converts the auth result back into the effective credential used by refreshModels.
-				await provider.refreshModels?.({
-					allowNetwork: true,
-					credential: { type: "api_key", key: resolution.auth.apiKey, env: resolution.env },
-				});
+				await provider.refreshModels?.(
+					refreshContext({
+						credential: { type: "api_key", key: resolution.auth.apiKey, env: resolution.env },
+					}),
+				);
 				expect(fetchMock).toHaveBeenCalled();
 			} finally {
 				fetchMock.mockRestore();
@@ -461,10 +477,16 @@ describe("Pi native provider compatibility", () => {
 				await providerExtension(pi);
 				catalogVersion = 2;
 				const provider = registeredProviders.get("cliproxyapi") as {
-					refreshModels?: (context: { allowNetwork: boolean; signal?: AbortSignal }) => Promise<void>;
+					refreshModels?: (context: RefreshContext) => Promise<void>;
 					getModels: () => Array<{ id: string }>;
 				};
-				await provider.refreshModels?.({ allowNetwork: true });
+				// A superseded publication must not change provider state.
+				const stale = refreshContext({}, false);
+				await provider.refreshModels?.(stale);
+				expect(stale.publish).toHaveBeenCalledTimes(1);
+				expect(provider.getModels().map((model) => model.id)).toEqual(["model-1"]);
+
+				await provider.refreshModels?.(refreshContext());
 				expect(provider.getModels().map((model) => model.id)).toEqual(["model-2"]);
 			} finally {
 				fetchMock.mockRestore();
@@ -501,9 +523,7 @@ describe("Pi native provider compatibility", () => {
 				expect(getAuth).toHaveBeenCalledTimes(1);
 				supported = false;
 				const provider = registeredProviders.get("cliproxyapi") as unknown as Provider;
-				await provider.refreshModels?.({ allowNetwork: true } as Parameters<
-					NonNullable<Provider["refreshModels"]>
-				>[0]);
+				await provider.refreshModels?.(refreshContext());
 				await expect(tool.execute("test", { query: "news" }, undefined, undefined, ctx)).rejects.toThrow(
 					"explicit web_search support",
 				);

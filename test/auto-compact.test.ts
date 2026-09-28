@@ -1,52 +1,21 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CompactionController, resolveCompactionSessionId } from "../extensions/auto-compact.ts";
 
 describe("compaction controller", () => {
-	const tempDirs: string[] = [];
-
-	afterEach(() => {
-		while (tempDirs.length > 0) {
-			const dir = tempDirs.pop();
-			if (dir) rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
 	function setup(cleanupResources = vi.fn()) {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-auto-compact-agent-"));
-		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-auto-compact-cwd-"));
-		tempDirs.push(agentDir, cwd);
-		const settingsPath = join(agentDir, "settings.json");
-		writeFileSync(settingsPath, `${JSON.stringify({ compaction: { enabled: true, reserveTokens: 16384 } })}\n`);
-
 		const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
 		const pi = {
 			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
 		} as unknown as ExtensionAPI;
-		const controller = new CompactionController(agentDir, "cliproxyapi", cleanupResources);
-		controller.register(pi);
+		new CompactionController(cleanupResources).register(pi);
 
-		const model = {
-			id: "gpt-5.6-sol",
-			provider: "cliproxyapi",
-			api: "openai-codex-responses",
-			contextWindow: 272000,
-		} as Model<Api>;
 		const sessionId = "session-compact-1";
 		const ctx = {
-			cwd,
-			model,
 			sessionId,
 			sessionManager: { getSessionId: () => sessionId },
-			isProjectTrusted: () => false,
 		} as unknown as ExtensionContext;
-		handlers.get("session_start")?.({}, ctx);
-
-		return { ctx, handlers, settingsPath, cleanupResources, sessionId, controller };
+		return { ctx, handlers, cleanupResources, sessionId };
 	}
 
 	it.each([
@@ -61,10 +30,9 @@ describe("compaction controller", () => {
 	});
 
 	it("leaves resource cleanup to Pi when the extension runtime shuts down", () => {
-		const { ctx, handlers, cleanupResources, controller } = setup();
-		handlers.get("session_shutdown")?.({ reason: "reload" }, ctx);
+		const { handlers, cleanupResources } = setup();
+		expect(handlers.has("session_shutdown")).toBe(false);
 		expect(cleanupResources).not.toHaveBeenCalled();
-		expect(controller.getCompactionSettings()).toBeUndefined();
 	});
 
 	it("never cleans other sessions when the compacted session id is missing", () => {
@@ -88,21 +56,6 @@ describe("compaction controller", () => {
 		} finally {
 			warn.mockRestore();
 		}
-	});
-
-	it("reloads footer settings after provider turns without cleaning resources", async () => {
-		const { ctx, handlers, settingsPath, controller, cleanupResources } = setup();
-		expect(controller.getCompactionSettings()).toMatchObject({ enabled: true, reserveTokens: 16384 });
-		writeFileSync(settingsPath, `${JSON.stringify({ compaction: { enabled: false, reserveTokens: 32768 } })}\n`);
-
-		await handlers.get("turn_end")?.(
-			{
-				message: { role: "assistant", provider: "cliproxyapi", model: ctx.model!.id },
-			},
-			ctx,
-		);
-		expect(controller.getCompactionSettings()).toMatchObject({ enabled: false, reserveTokens: 32768 });
-		expect(cleanupResources).not.toHaveBeenCalled();
 	});
 });
 

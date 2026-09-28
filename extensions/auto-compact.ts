@@ -1,10 +1,5 @@
 import { cleanupSessionResources } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
-
-export interface CompactionSettings {
-	enabled: boolean;
-	reserveTokens: number;
-}
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type SessionResourceCleanup = (sessionId?: string) => void;
 
@@ -23,29 +18,12 @@ export function resolveCompactionSessionId(source?: {
 	return undefined;
 }
 
-/** Pi owns compaction triggers; this controller only maintains settings and resources. */
+/** Pi owns compaction triggers; this controller only resets the compacted session's WebSocket. */
 export class CompactionController {
-	private settingsManager: SettingsManager | undefined;
-
-	constructor(
-		private readonly agentDir: string,
-		private readonly providerId: string,
-		private readonly cleanupResources: SessionResourceCleanup = cleanupSessionResources,
-	) {}
+	constructor(private readonly cleanupResources: SessionResourceCleanup = cleanupSessionResources) {}
 
 	register(pi: ExtensionAPI): void {
-		pi.on("session_start", (_event, ctx) => {
-			this.settingsManager = SettingsManager.create(ctx.cwd, this.agentDir, {
-				projectTrusted: ctx.isProjectTrusted(),
-			});
-		});
-
-		// Pi's AgentSession.dispose() already cleans the disposed session's resources.
-		// A global cleanup here would also close other sessions' and providers' sockets.
-		pi.on("session_shutdown", () => {
-			this.settingsManager = undefined;
-		});
-
+		// Pi's AgentSession.dispose() already cleans the disposed session's resources on shutdown.
 		pi.on("session_compact", (_event, ctx) => {
 			// CLIProxyAPI binds server-side Codex context to the WebSocket. Compaction
 			// only rewrites the client message list, so reuse would keep cacheRead high
@@ -54,24 +32,6 @@ export class CompactionController {
 			// Pi only caches WebSockets under a session id; without one there is nothing to reset.
 			if (sessionId) this.resetSessionResources(sessionId);
 		});
-
-		pi.on("turn_end", async (event, ctx) => {
-			const message = event.message;
-			if (message.role !== "assistant" || message.provider !== this.providerId) {
-				return;
-			}
-			if (!ctx.model || ctx.model.provider !== this.providerId || ctx.model.id !== message.model) {
-				return;
-			}
-
-			// Refresh the footer's budget without intercepting the next request:
-			// Pi may already be sending a compaction summary on the same model.
-			await this.settingsManager?.reload();
-		});
-	}
-
-	getCompactionSettings(): CompactionSettings | undefined {
-		return this.settingsManager?.getCompactionSettings();
 	}
 
 	private resetSessionResources(sessionId: string): void {

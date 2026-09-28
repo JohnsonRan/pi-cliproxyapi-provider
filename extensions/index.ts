@@ -32,7 +32,6 @@ import {
 	loadCliproxyCodexStreams,
 } from "./codex-stream.ts";
 import { FastModeController } from "./fast.ts";
-import { FastFooterController } from "./fast-footer.ts";
 import {
 	CONFIG_FILE_NAME,
 	DEFAULT_BASE_URL,
@@ -59,6 +58,7 @@ import { pauseController, waitForPauseToEnd } from "./pause.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import { registerNativeSearch } from "./search.ts";
 import { SessionHierarchy } from "./session.ts";
+import { ProviderStatusController } from "./status.ts";
 
 interface RefreshResult {
 	modelCount: number;
@@ -94,6 +94,8 @@ function logInfo(message: string): void {
 interface ModelCapabilities {
 	webSearch: Set<string>;
 	sse: Set<string>;
+	/** Called after a catalog update so Fast status reflects new support. */
+	changed?: () => void;
 }
 
 function replaceIds(target: Set<string>, ids: string[] | undefined): void {
@@ -111,6 +113,7 @@ function setModelCapabilities(
 	fastMode.setSupportedModelIds(loaded.fastModelIds);
 	replaceIds(capabilities.webSearch, loaded.webSearchModelIds);
 	replaceIds(capabilities.sse, loaded.sseModelIds);
+	capabilities.changed?.();
 }
 
 function useMaxContextWindow(agentDir: string): boolean {
@@ -555,8 +558,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	const hierarchy = new SessionHierarchy();
 	hierarchy.register(pi);
-	const compaction = new CompactionController(agentDir, identity.providerId);
-	compaction.register(pi);
+	new CompactionController().register(pi);
 
 	let fastEnabled = false;
 	try {
@@ -612,7 +614,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		hierarchy,
 	});
 
-	const fastFooter = new FastFooterController(identity.providerId, fastMode, () => compaction.getCompactionSettings());
+	const status = new ProviderStatusController(identity.providerId, fastMode);
+	status.register(pi);
+	capabilities.changed = () => status.refresh();
 	let refreshModelsForFast: ((ctx: ExtensionContext) => Promise<void>) | undefined;
 	const onFastModeChange = async (_enabled: boolean, ctx: ExtensionContext): Promise<void> => {
 		await refreshModelsForFast?.(ctx);
@@ -622,10 +626,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		agentDir,
 		providerId: identity.providerId,
 		fastMode,
-		onStatusChange: (ctx) => fastFooter.refresh(ctx),
+		onStatusChange: (ctx) => status.refresh(ctx),
 		onModeChange: onFastModeChange,
 	});
-	fastFooter.register(pi);
 
 	// Always register native auth so provider is visible in /login immediately after install.
 	registerProvider(pi, {

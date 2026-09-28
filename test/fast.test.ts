@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
-import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyFastPayloadHook,
@@ -16,9 +16,9 @@ import {
 	wrapStreamSimpleForTransport,
 } from "../extensions/codex-stream.ts";
 import { FastModeController } from "../extensions/fast.ts";
-import { FastFooterController, formatFastModelStatus } from "../extensions/fast-footer.ts";
 import { loadMappedModels } from "../extensions/lib.ts";
 import { PauseController } from "../extensions/pause.ts";
+import { ProviderStatusController, STATUS_KEY } from "../extensions/status.ts";
 
 const model = {
 	id: "gpt-5.4",
@@ -54,153 +54,68 @@ describe("FastModeController", () => {
 	});
 });
 
-describe("Fast footer model status", () => {
-	it("appends Fast and paused labels at the right side of model status", () => {
-		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", true)).toBe("gpt-5.6-sol • xhigh • fast");
-		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", true, "fast", true)).toBe(
-			"gpt-5.6-sol • xhigh • fast • paused",
-		);
-		expect(formatFastModelStatus("gpt-5.6-sol", true, "xhigh", false)).toBe("gpt-5.6-sol • xhigh");
-	});
-
-	it("refreshes pi's built-in footer without replacing it", () => {
-		const fastMode = new FastModeController(false);
-		fastMode.setSupportedModelIds([model.id]);
-		const setFooter = vi.fn();
-		const setStatus = vi.fn();
-		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
-		const pi = {
-			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
-		} as unknown as ExtensionAPI;
-		const ctx = {
-			mode: "tui",
-			model,
-			ui: { setFooter, setStatus },
-		} as unknown as ExtensionContext;
-		const footer = new FastFooterController(model.provider, fastMode);
-		footer.register(pi);
-
-		handlers.get("session_start")?.({}, ctx);
-		footer.refresh(ctx);
-
-		expect(setFooter).not.toHaveBeenCalled();
-		expect(setStatus).toHaveBeenCalledWith("cliproxyapi-fast-refresh", undefined);
-		handlers.get("session_shutdown")?.({}, ctx);
-	});
-
-	it("patches and restores the built-in footer across session reloads", () => {
-		const originalRender = FooterComponent.prototype.render;
-		const displayModel = { id: model.id, provider: model.provider, reasoning: true, contextWindow: 372000 };
-		const stubRender = function stubRender(this: FooterComponent, width: number): string[] {
-			const session = (this as unknown as { session: { state: { model: typeof displayModel } } }).session;
-			if (width < 0) throw new Error("render failed");
-			return [`${session.state.model.id}|${session.state.model.reasoning}`];
-		};
-		const fastMode = new FastModeController(false);
-		fastMode.setSupportedModelIds([model.id]);
-		fastMode.setEnabled(true);
+describe("provider status line", () => {
+	function setup(options: { fast?: boolean; supported?: boolean; provider?: string } = {}) {
+		const fastMode = new FastModeController(options.fast ?? true);
+		fastMode.setSupportedModelIds(options.supported === false ? [] : [model.id]);
 		const pauseMode = new PauseController(false);
-		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const setStatus = vi.fn();
+		const setFooter = vi.fn();
+		const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
 		const pi = {
-			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+			on: (event: string, handler: (event: any, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 		} as unknown as ExtensionAPI;
 		const ctx = {
 			mode: "tui",
+			model: { ...model, provider: options.provider ?? model.provider },
 			ui: {
+				setStatus,
+				setFooter,
 				theme: {
 					fg: (color: string, text: string) => (color === "warning" ? `<yellow>${text}</yellow>` : text),
 					getColorMode: () => "256color",
 				},
 			},
 		} as unknown as ExtensionContext;
-		const footer = new FastFooterController(model.provider, fastMode, () => undefined, pauseMode);
-		const component = Object.create(FooterComponent.prototype) as FooterComponent;
-		Object.defineProperty(component, "session", {
-			value: { state: { model: displayModel, thinkingLevel: "xhigh" } },
-		});
+		const status = new ProviderStatusController(model.provider, fastMode, pauseMode);
+		status.register(pi);
+		handlers.get("session_start")?.({}, ctx);
+		return { status, fastMode, pauseMode, setStatus, setFooter, handlers, ctx };
+	}
+	const orangePaused = "\x1b[38;5;214mpaused\x1b[39m";
 
-		try {
-			FooterComponent.prototype.render = stubRender;
-			footer.register(pi);
-			handlers.get("session_start")?.({}, ctx);
-
-			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
-			expect(displayModel).toEqual({
-				id: "gpt-5.4",
-				provider: "cliproxyapi",
-				reasoning: true,
-				contextWindow: 372000,
-			});
-
-			const orangePaused = "\x1b[38;5;214mpaused\x1b[39m";
-			pauseMode.setEnabled(true);
-			expect(component.render(80)).toEqual([`gpt-5.4 • xhigh • <yellow>fast</yellow> • ${orangePaused}|false`]);
-			pauseMode.setEnabled(false);
-			fastMode.setEnabled(false);
-			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
-
-			pauseMode.setEnabled(true);
-			expect(component.render(80)).toEqual([`gpt-5.4 • xhigh • ${orangePaused}|false`]);
-			pauseMode.setEnabled(false);
-			fastMode.setEnabled(true);
-			fastMode.setSupportedModelIds([]);
-			expect(component.render(80)).toEqual(["gpt-5.4|true"]);
-
-			pauseMode.setEnabled(true);
-			expect(component.render(80)).toEqual([`gpt-5.4 • xhigh • ${orangePaused}|false`]);
-			pauseMode.setEnabled(false);
-			fastMode.setSupportedModelIds([model.id]);
-
-			expect(() => component.render(-1)).toThrow("render failed");
-			expect(displayModel.contextWindow).toBe(372000);
-
-			handlers.get("session_shutdown")?.({}, ctx);
-			expect(FooterComponent.prototype.render).toBe(stubRender);
-
-			handlers.get("session_start")?.({}, ctx);
-			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
-		} finally {
-			handlers.get("session_shutdown")?.({}, ctx);
-			FooterComponent.prototype.render = originalRender;
-		}
+	it("shows Fast through the public status API without touching the footer", () => {
+		const { setStatus, setFooter } = setup();
+		expect(setStatus).toHaveBeenLastCalledWith(STATUS_KEY, "<yellow>fast</yellow>");
+		expect(setFooter).not.toHaveBeenCalled();
 	});
 
-	it("uses the compaction threshold for the footer percentage and denominator", () => {
-		const originalRender = FooterComponent.prototype.render;
-		const displayModel = { id: model.id, provider: model.provider, reasoning: true, contextWindow: 372000 };
-		const stubRender = function stubRender(this: FooterComponent): string[] {
-			const session = (this as unknown as { session: { state: { model: typeof displayModel } } }).session;
-			const contextWindow = session.state.model.contextWindow;
-			return [`${((100000 / contextWindow) * 100).toFixed(1)}%/${Math.round(contextWindow / 1000)}k`];
-		};
-		const fastMode = new FastModeController(false);
-		const footer = new FastFooterController(model.provider, fastMode, () => ({
-			enabled: true,
-			reserveTokens: 65536,
-		}));
-		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
-		const pi = {
-			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
-		} as unknown as ExtensionAPI;
-		const ctx = { mode: "tui" } as ExtensionContext;
-		const component = Object.create(FooterComponent.prototype) as FooterComponent;
-		Object.defineProperty(component, "session", { value: { state: { model: displayModel } } });
-		Object.defineProperty(component, "autoCompactEnabled", { value: true, writable: true });
+	it("tracks pause changes and clears the label when nothing applies", () => {
+		const { status, fastMode, pauseMode, setStatus } = setup();
+		pauseMode.setEnabled(true);
+		expect(setStatus).toHaveBeenLastCalledWith(STATUS_KEY, `<yellow>fast</yellow> • ${orangePaused}`);
+		fastMode.setEnabled(false);
+		status.refresh();
+		expect(setStatus).toHaveBeenLastCalledWith(STATUS_KEY, orangePaused);
+		pauseMode.setEnabled(false);
+		expect(setStatus).toHaveBeenLastCalledWith(STATUS_KEY, undefined);
+	});
 
-		try {
-			FooterComponent.prototype.render = stubRender;
-			footer.register(pi);
-			handlers.get("session_start")?.({}, ctx);
+	it("omits Fast for unsupported models and all labels for other providers", () => {
+		expect(setup({ supported: false }).setStatus).toHaveBeenLastCalledWith(STATUS_KEY, undefined);
+		const other = setup({ provider: "anthropic" });
+		other.pauseMode.setEnabled(true);
+		expect(other.setStatus).toHaveBeenLastCalledWith(STATUS_KEY, undefined);
+	});
 
-			expect(component.render(80)).toEqual(["32.6%/306k"]);
-			expect(displayModel.contextWindow).toBe(372000);
-
-			(component as unknown as { autoCompactEnabled: boolean }).autoCompactEnabled = false;
-			expect(component.render(80)).toEqual(["26.9%/372k"]);
-		} finally {
-			handlers.get("session_shutdown")?.({}, ctx);
-			FooterComponent.prototype.render = originalRender;
-		}
+	it("follows model_select and stops listening after shutdown", () => {
+		const { pauseMode, setStatus, handlers, ctx } = setup();
+		handlers.get("model_select")?.({ model: { provider: "anthropic", id: "claude" } }, ctx);
+		expect(setStatus).toHaveBeenLastCalledWith(STATUS_KEY, undefined);
+		handlers.get("session_shutdown")?.({}, ctx);
+		const calls = setStatus.mock.calls.length;
+		pauseMode.setEnabled(true);
+		expect(setStatus).toHaveBeenCalledTimes(calls);
 	});
 });
 

@@ -9,6 +9,7 @@ export class PauseController {
 	private enabled = false;
 	private pauseStartedAtMs: number | undefined;
 	private pausedDurationMs = 0;
+	private readonly listeners = new Set<() => void>();
 
 	constructor(enabled = false) {
 		this.setEnabled(enabled);
@@ -25,6 +26,19 @@ export class PauseController {
 		}
 
 		this.enabled = enabled;
+		for (const listener of this.listeners) {
+			try {
+				listener();
+			} catch {
+				// Status display must never break request gating.
+			}
+		}
+	}
+
+	/** Subscribe to pause changes, including those picked up from another Pi process. */
+	onChange(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
 	}
 
 	isEnabled(): boolean {

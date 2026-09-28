@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -482,6 +482,8 @@ describe("config and auth file helpers", () => {
 		saveConfigFile(agentDir, { baseUrl: "http://a", apiKey: "k1", fast: true });
 		saveConfigFile(agentDir, { apiKey: "k2", providerName: "CPA" });
 
+		// Atomic replace leaves no temp files behind.
+		expect(readdirSync(agentDir)).toEqual([CONFIG_FILE_NAME]);
 		const loaded = loadConfigFile(agentDir);
 		expect(loaded).toEqual({
 			baseUrl: "http://a",

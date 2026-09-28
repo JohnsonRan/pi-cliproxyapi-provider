@@ -2,7 +2,7 @@
  * Pure helpers for CLIProxyAPI baseUrl normalization, model mapping, and config I/O.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
@@ -275,6 +275,22 @@ export function loadConfigFile(agentDir: string): CliproxyConfigFile {
 	}
 }
 
+/**
+ * Replace a file via temp + rename so concurrent readers (e.g. the 200 ms pause
+ * poll in another Pi process) never observe a truncated JSON document.
+ */
+export function writeFileAtomic(path: string, content: string): void {
+	const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+	writeFileSync(tempPath, content, "utf8");
+	try {
+		renameSync(tempPath, path);
+	} catch {
+		// Windows can refuse to replace a file another process holds open.
+		rmSync(tempPath, { force: true });
+		writeFileSync(path, content, "utf8");
+	}
+}
+
 export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): void {
 	const configPath = join(agentDir, CONFIG_FILE_NAME);
 	mkdirSync(dirname(configPath), { recursive: true });
@@ -284,7 +300,7 @@ export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): vo
 		...existing,
 		...config,
 	};
-	writeFileSync(configPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+	writeFileAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
 }
 
 export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsCacheFile | null {
@@ -310,7 +326,7 @@ export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsC
 export function saveModelsCache(agentDir: string, loaded: MappedModels, fetchedAt = Date.now()): void {
 	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
 	mkdirSync(dirname(cachePath), { recursive: true });
-	writeFileSync(cachePath, `${JSON.stringify({ ...loaded, fetchedAt }, null, 2)}\n`, "utf8");
+	writeFileAtomic(cachePath, `${JSON.stringify({ ...loaded, fetchedAt }, null, 2)}\n`);
 }
 
 export function loadAuthConnection(agentDir: string, providerId: string): { baseUrl?: string; apiKey?: string } | null {

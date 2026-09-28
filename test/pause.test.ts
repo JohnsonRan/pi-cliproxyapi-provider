@@ -190,6 +190,33 @@ describe("Elapsed timer", () => {
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining(", 6.0s"), "info");
 	});
 
+	it("shows final TPS in the footer after settling", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		pauseController.setEnabled(false);
+
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+		const setStatus = vi.fn();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+				handlers.set(event, handler);
+			},
+		} as unknown as ExtensionAPI;
+		const ctx = {
+			hasUI: true,
+			mode: "tui",
+			ui: { notify: vi.fn(), setStatus, theme: { fg: (_color: string, text: string) => text } },
+		} as unknown as ExtensionContext;
+
+		tpsExtension(pi);
+		await handlers.get("before_agent_start")?.({}, ctx);
+		await vi.advanceTimersByTimeAsync(4000);
+		const usage = { input: 10, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
+		await handlers.get("agent_end")?.({ messages: [{ role: "assistant", usage }] }, ctx);
+		await handlers.get("agent_settled")?.({}, ctx);
+		expect(setStatus).toHaveBeenLastCalledWith("tps", "Elapsed 4s · TPS 25.0 tok/s");
+	});
+
 	it("ignores late agent events after session shutdown", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);

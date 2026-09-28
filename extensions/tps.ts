@@ -83,9 +83,9 @@ export default function (pi: ExtensionAPI) {
 		return parts.join(" ");
 	}
 
-	function setElapsedStatus(ctx: ExtensionContext, totalSeconds: number): void {
+	function setElapsedStatus(ctx: ExtensionContext, totalSeconds: number, suffix = ""): void {
 		if (!isPrimaryUiSession(ctx)) return;
-		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", `Elapsed ${formatElapsed(totalSeconds)}`));
+		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", `Elapsed ${formatElapsed(totalSeconds)}${suffix}`));
 	}
 
 	function refreshStatus(): void {
@@ -152,13 +152,14 @@ export default function (pi: ExtensionAPI) {
 		requestStartMs = null;
 		clearRefreshTimer();
 
-		// Keep the final total time in the footer after the run settles.
-		setElapsedStatus(ctx, elapsedSecondsFloor);
+		const tps = output > 0 && elapsedMs > 0 ? (output / elapsedSecondsExact).toFixed(1) : "--";
+
+		// Keep the final total time (and TPS when known) in the footer after the run settles.
+		setElapsedStatus(ctx, elapsedSecondsFloor, tps === "--" ? "" : ` · TPS ${tps} tok/s`);
 		statusCtx = ctx;
 
 		if (elapsedMs <= 0) return;
 
-		const tps = output > 0 ? (output / elapsedSecondsExact).toFixed(1) : "--";
 		const message = `TPS ${tps} tok/s. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSecondsExact.toFixed(1)}s`;
 		ctx.ui.notify(message, "info");
 	});

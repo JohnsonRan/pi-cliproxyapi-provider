@@ -295,7 +295,7 @@ If you previously maintained a static provider such as `cpa-responses` in `~/.pi
 The package also registers `extensions/tps.ts`, which only activates for the primary interactive TUI session (`ctx.hasUI && ctx.mode === "tui"`):
 
 - While the agent is running, the footer shows `Elapsed …` (updates every second).
-- When the agent settles, the footer keeps the final elapsed time and a notification reports approximate TPS plus token usage (`out` / `in` / cache r/w / total).
+- When the agent settles, the footer keeps the final elapsed time plus TPS (e.g. `Elapsed 12s · TPS 45.3 tok/s`) and a notification reports approximate TPS plus token usage (`out` / `in` / cache r/w / total).
 - Subagent and print-mode sessions do not own the timer, clear the parent footer, or emit TPS toasts.
 
 Disable just this helper via `pi config` if you only want the CLIProxyAPI provider.

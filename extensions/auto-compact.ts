@@ -40,16 +40,19 @@ export class CompactionController {
 			});
 		});
 
+		// Pi's AgentSession.dispose() already cleans the disposed session's resources.
+		// A global cleanup here would also close other sessions' and providers' sockets.
 		pi.on("session_shutdown", () => {
 			this.settingsManager = undefined;
-			this.resetSessionResources();
 		});
 
 		pi.on("session_compact", (_event, ctx) => {
 			// CLIProxyAPI binds server-side Codex context to the WebSocket. Compaction
 			// only rewrites the client message list, so reuse would keep cacheRead high
 			// and retrigger compaction on a now-small session.
-			this.resetSessionResources(resolveCompactionSessionId(ctx));
+			const sessionId = resolveCompactionSessionId(ctx);
+			// Pi only caches WebSockets under a session id; without one there is nothing to reset.
+			if (sessionId) this.resetSessionResources(sessionId);
 		});
 
 		pi.on("turn_end", async (event, ctx) => {
@@ -71,13 +74,12 @@ export class CompactionController {
 		return this.settingsManager?.getCompactionSettings();
 	}
 
-	private resetSessionResources(sessionId?: string): void {
+	private resetSessionResources(sessionId: string): void {
 		try {
 			this.cleanupResources(sessionId);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const scope = sessionId ? `session ${sessionId}` : "all sessions";
-			console.warn(`[pi-cliproxyapi-provider] failed to clean Pi resources for ${scope}: ${message}`);
+			console.warn(`[pi-cliproxyapi-provider] failed to clean Pi resources for session ${sessionId}: ${message}`);
 		}
 	}
 }

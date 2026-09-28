@@ -60,19 +60,19 @@ describe("compaction controller", () => {
 		expect(cleanupResources).toHaveBeenCalledWith(sessionId);
 	});
 
-	it("cleans all resources and clears settings when the extension runtime shuts down", () => {
+	it("leaves resource cleanup to Pi when the extension runtime shuts down", () => {
 		const { ctx, handlers, cleanupResources, controller } = setup();
 		handlers.get("session_shutdown")?.({ reason: "reload" }, ctx);
-		expect(cleanupResources).toHaveBeenCalledWith(undefined);
+		expect(cleanupResources).not.toHaveBeenCalled();
 		expect(controller.getCompactionSettings()).toBeUndefined();
 	});
 
-	it("cleans all resources when the compacted session id is missing", () => {
+	it("never cleans other sessions when the compacted session id is missing", () => {
 		const { handlers, cleanupResources } = setup();
 		handlers.get("session_compact")?.({ reason: "manual" }, {
 			sessionManager: { getSessionId: () => "" },
 		} as unknown as ExtensionContext);
-		expect(cleanupResources).toHaveBeenCalledWith(undefined);
+		expect(cleanupResources).not.toHaveBeenCalled();
 	});
 
 	it("keeps compaction working if resource cleanup throws", () => {

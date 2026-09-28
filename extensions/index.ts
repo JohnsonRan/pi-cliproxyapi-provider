@@ -231,7 +231,13 @@ function registerProvider(
 				}),
 				defaultBaseUrl,
 			)!;
-			resolveEndpoints(baseUrl);
+			try {
+				resolveEndpoints(baseUrl);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				interaction.notify({ type: "info", message: `Invalid base URL (${message}). Please re-enter it.` });
+				continue;
+			}
 			const apiKey = (
 				await interaction.prompt({ type: "secret", message: "CLIProxyAPI API key:", placeholder: "sk-..." })
 			).trim();

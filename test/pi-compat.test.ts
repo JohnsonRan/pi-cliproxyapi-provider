@@ -278,11 +278,16 @@ describe("Pi native provider compatibility", () => {
 					};
 					getModels: () => Array<{ id: string }>;
 				};
-				const answers = ["http://127.0.0.1:8317", "native-key"];
+				// An invalid base URL re-prompts instead of aborting login.
+				const answers = ["http://", "http://127.0.0.1:8317", "native-key"];
+				const notify = vi.fn();
 				const credential = await provider.auth.apiKey.login({
 					prompt: async () => answers.shift() ?? "",
-					notify: vi.fn(),
+					notify,
 				});
+				expect(notify).toHaveBeenCalledWith(
+					expect.objectContaining({ message: expect.stringContaining("Invalid base URL") }),
+				);
 
 				expect(credential).toEqual({
 					type: "api_key",

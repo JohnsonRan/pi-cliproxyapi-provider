@@ -10,6 +10,7 @@ Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-
 - standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
 - uses Pi's public stock `openai-codex-responses` stream without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
 - follows Pi's `transport` setting; under Pi's default `auto`, uses persistent WebSocket, or SSE for models the CPA catalog marks `prefer_websockets: false`;
+- drops empty user/assistant messages (for example extension fold markers) before the request, because CPA forwards them to backends such as Claude or Gemini that reject empty content;
 - resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
 - keeps the model catalog in Pi's native model store and refresh lifecycle, and improves catalog mapping with opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
 

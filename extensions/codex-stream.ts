@@ -13,6 +13,7 @@ import {
 	type AssistantMessageEventStream,
 	type Context,
 	clampThinkingLevel,
+	type Message,
 	type Model,
 	type OpenAICodexResponsesOptions,
 	type Provider,
@@ -157,6 +158,32 @@ export function wrapCodexStreamForTransport(
 	) as CliproxyCodexStream;
 }
 
+/**
+ * Empty user/assistant messages (e.g. watchdog fold markers that convert to `""`) become empty
+ * `input_text`/`output_text` items, which CPA forwards to backends such as Claude or Gemini that
+ * reject empty content. Signed blocks and tool calls are always kept: providers require them.
+ */
+export function isEmptyMessage(message: Message): boolean {
+	if (message.role === "user") {
+		return typeof message.content === "string"
+			? !message.content.trim()
+			: message.content.every((block) => block.type === "text" && !block.text.trim());
+	}
+	if (message.role !== "assistant") return false;
+	return message.content.every(
+		(block) =>
+			(block.type === "text" && !block.textSignature && !block.text.trim()) ||
+			(block.type === "thinking" && !block.thinkingSignature && !block.thinking.trim()),
+	);
+}
+
+function wrapStreamForEmptyMessages<TOptions extends StreamOptions>(
+	stream: CliproxyCodexStreamFunction<TOptions>,
+): CliproxyCodexStreamFunction<TOptions> {
+	return (model, context, options) =>
+		stream(model, { ...context, messages: context.messages.filter((message) => !isEmptyMessage(message)) }, options);
+}
+
 function wrapStreamForSession<TOptions extends StreamOptions>(
 	stream: CliproxyCodexStreamFunction<TOptions>,
 	getHeaders?: CliproxyCodexStreamOptions["getSessionHeaders"],
@@ -182,11 +209,11 @@ export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {
 		resolveCliproxyTransport(streamOptions, options.prefersSse?.(model) ?? false);
 	const useFast = (model: Model<Api>): boolean => options.shouldUseFast?.(model) ?? false;
 	const stockStreamSimple = wrapStreamForSession(
-		stock.streamSimple as CliproxyCodexStreamSimple,
+		wrapStreamForEmptyMessages(stock.streamSimple as CliproxyCodexStreamSimple),
 		options.getSessionHeaders,
 	);
 	const stockStream = wrapStreamForSession(
-		stock.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
+		wrapStreamForEmptyMessages(stock.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>),
 		options.getSessionHeaders,
 	) as CliproxyCodexStream;
 	const simple = wrapStreamSimpleForTransport(wrapStreamSimpleForCliproxyAuth(stockStreamSimple), transport);

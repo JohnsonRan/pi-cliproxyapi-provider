@@ -212,6 +212,32 @@ describe("Pi stock Codex streams", () => {
 		expect(FakeWebSocket.instances[0]?.sent[0]?.prompt_cache_key).toBe("child-id");
 	});
 
+	it("drops empty user and assistant messages before the request", async () => {
+		vi.stubGlobal("WebSocket", FakeWebSocket);
+		const emptyAssistant: AssistantMessage = {
+			role: "assistant",
+			api: CLIPROXYAPI_CODEX_API,
+			provider: "cliproxyapi",
+			model: "gpt-5.6-sol",
+			content: [{ type: "text", text: " " }],
+			stopReason: "stop",
+			usage: emptyUsage(),
+			timestamp: Date.now(),
+		};
+		const context = normalizeContext({
+			messages: [userMessage("hello"), userMessage(""), emptyAssistant, userMessage("again")],
+		});
+		const result = await loadCliproxyCodexStreams()
+			.streamSimple(createModel(), context, { apiKey: REAL_API_KEY })
+			.result();
+		expect(result.stopReason).toBe("stop");
+		const input = FakeWebSocket.instances[0]?.sent[0]?.input as Array<{ role?: string; content?: unknown }>;
+		expect(input.map((item) => [item.role, item.content])).toEqual([
+			["user", [{ type: "input_text", text: "hello" }]],
+			["user", [{ type: "input_text", text: "again" }]],
+		]);
+	});
+
 	it("sends SSE through the public stock API with split auth and Fast priority pricing", async () => {
 		let requestUrl: string | undefined;
 		let requestHeaders: IncomingHttpHeaders | undefined;

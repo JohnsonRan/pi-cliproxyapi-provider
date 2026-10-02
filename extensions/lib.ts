@@ -36,6 +36,8 @@ export interface CliproxyConfigFile {
 	webSearch?: boolean;
 	pause?: boolean;
 	useMaxContextWindow?: boolean;
+	/** CPA image model ids exposed to Pi image generation. */
+	imageModels?: string[];
 }
 
 export interface ResolvedIdentity {

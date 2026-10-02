@@ -26,6 +26,7 @@ Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex cl
 7. Stores the model catalog through Pi's native provider refresh lifecycle (Pi's `models-store.json`) and provides `/cliproxyapi-refresh` to force a refresh.
 8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 9. Leaves compaction triggering to Pi, including native checks between tool turns. After compaction, closes the reused Codex WebSocket for that session so CLIProxyAPI's server-side context resets with the compacted client messages. The extension does not inject synthetic context-overflow errors or block summary requests.
+10. Optionally registers CPA image models listed in `imageModels` for Pi image generation.
 
 ## Install
 
@@ -111,6 +112,7 @@ Optional fields:
 | `webSearch` | `false` | Enable the `cliproxyapi_search` tool for models with explicit native search support |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
 | `useMaxContextWindow` | `false` | Use catalog `max_context_window` instead of standard `context_window` when available |
+| `imageModels` | `[]` | CPA image model ids (e.g. `["gpt-image-2"]`) registered as Pi image models; see [Image generation](#image-generation) |
 
 ### Environment overrides
 
@@ -203,6 +205,16 @@ The tool sends **only the query**, not conversation history, to `{root}/v1/respo
 This is an **additional model request** and may incur native search fees. Token costs use the model catalog rates (with the same priority multiplier when Fast applies); separate per-search charges are not included. Catalog-supported `/fast` applies to the search request too. The tool reuses Pi's resolved model credentials and headers; it does not store another API key.
 
 `CLIPROXYAPI_WEB_SEARCH` overrides `webSearch` at startup. The command changes the current session and persisted preference; an environment override still wins on the next startup. Turning the tool off prevents new calls, but does not cancel an HTTP request already in progress.
+
+## Image generation
+
+CPA serves image models through `{root}/v1/images/generations` and `{root}/v1/images/edits`, but its Codex catalog hides them without saying they are image models. List the ones you want in `cliproxyapi.json`:
+
+```json
+{ "imageModels": ["gpt-image-2"] }
+```
+
+They are registered as Pi image models under this provider and use the same credential. Like Pi's other image models, they do not appear in `/model`; codemode scripts reach them with `models.getAvailableOfType("image")` and `models.generateImages()`, and extensions with `ctx.modelRegistry.generateImages()`. A request with only text calls `generations`; a request with input images calls `edits` with them as `data:` URLs. Images come back as base64 (`response_format: "b64_json"`). Image costs are reported as zero. Changes to `imageModels` apply after `/reload`.
 
 ## Session hierarchy
 

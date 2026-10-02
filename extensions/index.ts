@@ -41,6 +41,7 @@ import {
 	loadCliproxyCodexStreams,
 } from "./codex-stream.ts";
 import { FastModeController } from "./fast.ts";
+import { generateImages, parseImageModelIds, toImageModel } from "./images.ts";
 import {
 	AUTH_FILE_NAME,
 	CONFIG_FILE_NAME,
@@ -148,6 +149,16 @@ function registerProvider(
 ): { loadStartupCatalog: () => Promise<void> } {
 	const { providerId, providerName, agentDir, stream, streamSimple, fastMode, capabilities } = options;
 	const baseUrlInput = resolveDefaultBaseUrl(agentDir, providerId);
+	let imageModelIds: string[] = [];
+	try {
+		imageModelIds = parseImageModelIds(loadConfigFile(agentDir).imageModels);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logWarn(`invalid image model configuration (${message}); image generation is disabled`);
+	}
+	const imageModels = imageModelIds.map((id) =>
+		toImageModel(id, providerId, resolveEndpoints(baseUrlInput).inferenceBaseUrl),
+	);
 	const bindModels = (entries: PiProviderModel[], inferenceBaseUrl: string): Model<Api>[] =>
 		entries.map((model) => ({
 			...model,
@@ -289,6 +300,8 @@ function registerProvider(
 			},
 		},
 		getModels: () => currentModels,
+		getAllModels: () => [...currentModels, ...imageModels],
+		generateImages,
 		refreshModels: async (context) => {
 			const credential = context.credential?.type === "api_key" ? context.credential : undefined;
 			cleanupMigratedConfigCredentials(credential);

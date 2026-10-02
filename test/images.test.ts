@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Provider } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseImagesResponse } from "../extensions/images.ts";
 import providerExtension from "../extensions/index.ts";
 import { AUTH_FILE_NAME } from "../extensions/lib.ts";
 
@@ -112,5 +113,18 @@ describe("CLIProxyAPI image models", () => {
 
 		writeFileSync(join(agentDir, "cliproxyapi.json"), JSON.stringify({}));
 		expect((await loadRuntime()).getModelsOfType("image", "cliproxyapi")).toEqual([]);
+	});
+
+	it("sniffs the mime type when CPA omits output_format", () => {
+		const output = { output: [] } as unknown as Parameters<typeof parseImagesResponse>[1];
+		parseImagesResponse(
+			{ data: [{ b64_json: "/9j/4AAQ" }, { b64_json: "iVBORw0KGgoA" }, { b64_json: "???" }] },
+			output,
+		);
+		expect(output.output.map((item) => item.type === "image" && item.mimeType)).toEqual([
+			"image/jpeg",
+			"image/png",
+			"image/png",
+		]);
 	});
 });

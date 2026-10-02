@@ -71,12 +71,26 @@ interface ImagesResponse {
 	usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
 }
 
+/** Base64 magic-byte prefixes; used when CPA omits `output_format` (e.g. Grok returns JPEG without it). */
+const BASE64_SIGNATURES: Array<[string, string]> = [
+	["iVBORw0KGgo", "image/png"],
+	["/9j/", "image/jpeg"],
+	["UklGR", "image/webp"],
+	["R0lGOD", "image/gif"],
+];
+
+function sniffMimeType(data: string): string {
+	return BASE64_SIGNATURES.find(([prefix]) => data.startsWith(prefix))?.[1] ?? "image/png";
+}
+
 export function parseImagesResponse(payload: ImagesResponse, output: AssistantImages): void {
-	const mimeType = `image/${payload.output_format === "jpg" ? "jpeg" : (payload.output_format ?? "png")}`;
+	const format = payload.output_format === "jpg" ? "jpeg" : payload.output_format;
 	for (const item of payload.data ?? []) {
 		const dataUrl = item.url?.match(/^data:([^;]+);base64,(.+)$/);
-		if (item.b64_json) output.output.push({ type: "image", data: item.b64_json, mimeType });
-		else if (dataUrl) output.output.push({ type: "image", mimeType: dataUrl[1]!, data: dataUrl[2]! });
+		if (item.b64_json) {
+			const mimeType = format ? `image/${format}` : sniffMimeType(item.b64_json);
+			output.output.push({ type: "image", data: item.b64_json, mimeType });
+		} else if (dataUrl) output.output.push({ type: "image", mimeType: dataUrl[1]!, data: dataUrl[2]! });
 		else if (item.url) output.output.push({ type: "text", text: `Image URL: ${item.url}` });
 		if (item.revised_prompt) output.output.push({ type: "text", text: `Revised prompt: ${item.revised_prompt}` });
 	}

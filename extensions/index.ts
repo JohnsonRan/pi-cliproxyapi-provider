@@ -19,7 +19,14 @@
  */
 
 import { join } from "node:path";
-import type { Api, ApiKeyCredential, AuthInteraction, Model, Provider } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type ApiKeyCredential,
+	type AuthInteraction,
+	isModelType,
+	type Model,
+	type Provider,
+} from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -289,7 +296,8 @@ function registerProvider(
 			if (!connection) return;
 			const inferenceBaseUrl = resolveEndpoints(connection.baseUrl).inferenceBaseUrl;
 			const stored = (context.stored?.models ?? []).filter(
-				(model) => model.provider === providerId && model.baseUrl === inferenceBaseUrl,
+				(model): model is Model<Api> =>
+					isModelType(model, "chat") && model.provider === providerId && model.baseUrl === inferenceBaseUrl,
 			);
 			const fresh = startup?.baseUrl === inferenceBaseUrl ? startup : undefined;
 			const publish = async (models: Model<Api>[]): Promise<void> => {

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pauseController } from "../extensions/pause.ts";
 import {
@@ -94,7 +94,7 @@ function setup(enabled = false) {
 			find: (provider: string, id: string) => (provider === model.provider && id === model.id ? model : undefined),
 			getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "real-key", headers: { "X-Custom": "kept" } })),
 		},
-	} as unknown as ExtensionCommandContext;
+	} as unknown as ExtensionCommandContext & ExtensionToolContext;
 	let supported = true;
 	registerNativeSearch({
 		pi,

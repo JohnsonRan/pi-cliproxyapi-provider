@@ -7,6 +7,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
+	type ExtensionToolContext,
 	ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
@@ -527,7 +528,7 @@ describe("Pi native provider compatibility", () => {
 				const ctx = {
 					model,
 					modelRegistry: { find: () => model, getApiKeyAndHeaders: getAuth },
-				} as unknown as ExtensionContext;
+				} as unknown as ExtensionToolContext;
 				await expect(tool.execute("test", { query: "news" }, undefined, undefined, ctx)).rejects.toThrow(
 					"test auth boundary",
 				);

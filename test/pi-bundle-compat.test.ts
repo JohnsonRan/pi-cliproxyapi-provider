@@ -194,7 +194,7 @@ describe(`Pi ${piVersion} bundled CLI compatibility`, () => {
 			env.PI_CODING_AGENT_DIR = agentDir;
 			env.PI_OFFLINE = "1";
 
-			expect(piVersion).toBe("0.87.1");
+			expect(piVersion).toBe("1.0.0");
 			expect(existsSync(piCliPath)).toBe(true);
 			expect(existsSync(join(packageDir, "node_modules"))).toBe(false);
 			const result = await runPiAsync(

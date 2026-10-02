@@ -4,6 +4,8 @@
 	"fast": false,
 	"webSearch": false,
 	"pause": false,
+	"useMaxContextWindow": false,
+	"imageModels": [],
 	"providerId": "cliproxyapi",
 	"providerName": "CLIProxyAPI"
 }

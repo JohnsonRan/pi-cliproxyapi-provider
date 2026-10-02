@@ -145,7 +145,9 @@ CLIProxyAPI requests follow Pi's own `transport` setting (`~/.pi/agent/settings.
 
 Pi's stock Codex transport behavior applies: `websocket`, `websocket-cached`, and `auto` may fall back to SSE when WebSocket setup fails before response streaming starts. A failure after events begin is surfaced instead of replaying the request over SSE. Use `sse` to disable WebSocket. Pi currently has no strict WebSocket-only option.
 
-After any WebSocket failure, stock Pi keeps that session on SSE until the session ends. On Pi builds that export `getOpenAICodexWebSocketDebugStatsLazy` and `resetOpenAICodexWebSocketDebugStatsLazy` from `@earendil-works/pi-ai`, this extension lifts that: the first failure is retried on a fresh WebSocket at the next request (the failed socket was discarded, which covers a silently dead cached connection), and further consecutive failures stay on SSE for 5 minutes before WebSocket is tried again. A successful WebSocket request resets the sequence. Pi builds without these exports keep the stock behavior.
+After any WebSocket failure, stock Pi keeps that session on SSE until the session ends. On Pi builds that export `getOpenAICodexWebSocketDebugStatsLazy` and `resetOpenAICodexWebSocketDebugStatsLazy` from `@earendil-works/pi-ai`, this extension lifts that: the first failure is retried on a fresh WebSocket at the next request (the failed socket was discarded, which covers a silently dead cached connection), and further consecutive failures stay on SSE for 5 minutes before WebSocket is tried again. A successful WebSocket request resets the sequence.
+
+Official Pi 1.0.0 does not export these accessors, so it keeps the stock behavior. They are proposed for the [xz-dev/pi](https://github.com/xz-dev/pi) fork in [xz-dev/pi#8](https://github.com/xz-dev/pi/pull/8); recovery activates automatically on a build that includes them, with no configuration.
 
 ### baseUrl normalization
 
@@ -271,8 +273,6 @@ A non-empty catalog replaces the stored list, so a removed model disappears imme
 - `/cliproxyapi-refresh` forces an immediate refresh through Pi's model registry (`refresh({ providers: [id], force: true })`). Use it after adding or removing models on the proxy.
 - `/login CLIProxyAPI` / `/login cliproxyapi` validates the credentials, then Pi refreshes this provider's catalog.
 
-Older versions kept their own cache in `~/.pi/agent/cliproxyapi-models.json`. It is no longer read and can be deleted.
-
 ## Model mapping
 
 From CPA catalog entry → pi model:
@@ -296,11 +296,13 @@ Unsupported pi thinking levels are set to `null` so they are hidden in the UI. O
 
 The raw `models.dev` response is cached for 24 hours at `~/.pi/agent/tmp/models-dev-cache.json`. A fresh cache avoids the network request; an expired cache is refreshed with a three-second timeout, and stale data is retained if refresh fails. If neither the network nor a previous cache is available, pricing safely falls back to zero. A small explicit alias table covers known CLIProxyAPI variants such as `gemini-pro-agent` → `gemini-3.1-pro-preview`; unknown variants are not guessed.
 
-## Migration from versions using the custom API id
+## Migration
 
-Versions through 1.4.13 stored new assistant messages with the custom `cliproxyapi-codex-responses` API id. New messages use Pi's standard `openai-codex-responses` id. Existing sessions do not need to be rewritten: Pi replays their older messages as foreign API metadata and normalizes tool-call ids before sending them through the stock Codex stream, including parallel tool calls.
+- **Custom API id (through 1.4.13).** Older versions stored assistant messages with the custom `cliproxyapi-codex-responses` API id; new messages use Pi's standard `openai-codex-responses`. Existing sessions need no rewrite: Pi replays the older messages as foreign API metadata and normalizes tool-call ids, including parallel tool calls.
+- **Separate model cache.** Older versions kept their own cache in `~/.pi/agent/cliproxyapi-models.json`. It is no longer read and can be deleted.
+- **Transport setting.** `CLIPROXYAPI_TRANSPORT` and `transport` in `cliproxyapi.json` are replaced by Pi's own `transport` setting (see [Transport](#transport)).
 
-## Migration from static models.json
+### From a static models.json
 
 If you previously maintained a static provider such as `cpa-responses` in `~/.pi/agent/models.json`:
 
@@ -325,7 +327,7 @@ Disable just this helper via `pi config` if you only want the CLIProxyAPI provid
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
 - After successful `/login`: native API-key credentials are stored only in `auth.json`, and Pi refreshes the catalog.
 - The built-in `/logout` command removes the matching `auth.json` credential; environment variables and non-secret `cliproxyapi.json` settings are unchanged.
-- If a models request returns **HTTP 401** or CPA is unreachable during startup, a warning is logged and Pi's stored catalog for the configured `baseUrl` remains in use. Without a stored catalog, no models are listed until a refresh succeeds; reconfigure via `/login CLIProxyAPI` or fix config/env.
+- If a models request fails during startup (for example HTTP 401 or CPA unreachable), a warning is logged and Pi's stored catalog for the configured `baseUrl` remains in use. Without a stored catalog, no models are listed until a refresh succeeds; reconfigure via `/login CLIProxyAPI` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key

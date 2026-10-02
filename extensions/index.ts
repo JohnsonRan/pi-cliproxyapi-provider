@@ -68,6 +68,7 @@ import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import { registerNativeSearch } from "./search.ts";
 import { SessionHierarchy } from "./session.ts";
 import { ProviderStatusController } from "./status.ts";
+import { hostCodexWebSocketStateAccess, WebSocketRecovery } from "./ws-recovery.ts";
 
 /** Bound on the startup catalog fetch; Pi waits for the extension factory. */
 export const STARTUP_CATALOG_TIMEOUT_MS = 5_000;
@@ -566,6 +567,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// Config errors are reported where the config is actually used.
 	}
 
+	const webSocketStateAccess = hostCodexWebSocketStateAccess();
 	let stream: CliproxyCodexStream;
 	let streamSimple: CliproxyCodexStreamSimple;
 	try {
@@ -573,6 +575,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 			getSessionHeaders: (options) => hierarchy.headers(options),
 			prefersSse: (model) => model.provider === identity.providerId && capabilities.sse.has(model.id),
+			webSocketRecovery: webSocketStateAccess && new WebSocketRecovery(webSocketStateAccess),
 		});
 		stream = streams.stream;
 		streamSimple = streams.streamSimple;

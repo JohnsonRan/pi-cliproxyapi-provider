@@ -145,6 +145,8 @@ CLIProxyAPI requests follow Pi's own `transport` setting (`~/.pi/agent/settings.
 
 Pi's stock Codex transport behavior applies: `websocket`, `websocket-cached`, and `auto` may fall back to SSE when WebSocket setup fails before response streaming starts. A failure after events begin is surfaced instead of replaying the request over SSE. Use `sse` to disable WebSocket. Pi currently has no strict WebSocket-only option.
 
+After any WebSocket failure, stock Pi keeps that session on SSE until the session ends. On Pi builds that export `getOpenAICodexWebSocketDebugStatsLazy` and `resetOpenAICodexWebSocketDebugStatsLazy` from `@earendil-works/pi-ai`, this extension lifts that: the first failure is retried on a fresh WebSocket at the next request (the failed socket was discarded, which covers a silently dead cached connection), and further consecutive failures stay on SSE for 5 minutes before WebSocket is tried again. A successful WebSocket request resets the sequence. Pi builds without these exports keep the stock behavior.
+
 ### baseUrl normalization
 
 Preferred form is **host:port only**:

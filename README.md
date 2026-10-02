@@ -275,6 +275,8 @@ From CPA catalog entry → pi model:
 | `visibility: "hide"` | skipped |
 | `cpa_capabilities.web_search: true` | native search eligibility (separate from Pi deferred tool search) |
 
+Since CLIProxyAPI v8.0.9, the catalog sets `apply_patch_tool_type` to `null` unless the proxy sets `client.codex.enable-apply-patch: true`; without it, Pi uses plain function tools.
+
 Unsupported pi thinking levels are set to `null` so they are hidden in the UI. Output limits resolve in this order: CPA `max_tokens`, CPA `max_completion_tokens`, matching models.dev `limit.output`, then `16384`. CPA exposes this as model-catalog metadata on supported versions; it is a client budgeting value, not a guarantee that every backend enforces the same limit. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller data is not selected arbitrarily, and prices fall back to zero.
 
 The raw `models.dev` response is cached for 24 hours at `~/.pi/agent/tmp/models-dev-cache.json`. A fresh cache avoids the network request; an expired cache is refreshed with a three-second timeout, and stale data is retained if refresh fails. If neither the network nor a previous cache is available, pricing safely falls back to zero. A small explicit alias table covers known CLIProxyAPI variants such as `gemini-pro-agent` → `gemini-3.1-pro-preview`; unknown variants are not guessed.

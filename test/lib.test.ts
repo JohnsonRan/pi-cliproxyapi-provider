@@ -15,8 +15,8 @@ import {
 	extractReasoningEfforts,
 	fetchModelsDevCostMap,
 	firstNonEmpty,
-	isUnauthorizedModelsError,
 	loadConfigFile,
+	MODELS_DEV_CACHE_TTL_MS,
 	ModelsHttpError,
 	matchModelCost,
 	matchModelMaxTokens,
@@ -292,7 +292,7 @@ describe("models.dev cost mapping", () => {
 		);
 
 		try {
-			const catalog = await fetchModelsDevCostMap(tempAgentDir(), true);
+			const catalog = await fetchModelsDevCostMap(tempAgentDir());
 			expect(matchModelCost("gpt-5.6-sol", catalog)).toEqual({
 				input: 5,
 				output: 30,
@@ -354,7 +354,7 @@ describe("models.dev cost mapping", () => {
 		);
 
 		try {
-			const catalog = await fetchModelsDevCostMap(tempAgentDir(), true);
+			const catalog = await fetchModelsDevCostMap(tempAgentDir());
 			expect(matchModelCost("gemini-pro-agent", catalog)).toMatchObject({ input: 2, output: 12 });
 			expect(matchModelCost("gemini-3.1-pro-low", catalog).input).toBe(2);
 			expect(matchModelCost("gemini-3.6-flash-high", catalog).output).toBe(7.5);
@@ -405,7 +405,7 @@ describe("models.dev cost mapping", () => {
 	it("falls back to stale disk cache when network request fails", async () => {
 		const tempDir = tempAgentDir();
 		let shouldFail = false;
-		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
 			if (shouldFail) {
 				throw new Error("Network offline");
 			}
@@ -424,23 +424,21 @@ describe("models.dev cost mapping", () => {
 		try {
 			await fetchModelsDevCostMap(tempDir);
 			shouldFail = true;
+			vi.spyOn(Date, "now").mockReturnValue(Date.now() + MODELS_DEV_CACHE_TTL_MS + 1);
 
-			// Force refresh while offline should return stale cache instead of empty catalog
-			const catalog = await fetchModelsDevCostMap(tempDir, true);
+			// An expired cache refreshed while offline returns the stale catalog instead of an empty one
+			const catalog = await fetchModelsDevCostMap(tempDir);
 			expect(matchModelCost("gpt-5.6-sol", catalog).input).toBe(5);
 		} finally {
-			fetchMock.mockRestore();
+			vi.restoreAllMocks();
 		}
 	});
 });
 
 describe("ModelsHttpError", () => {
-	it("detects unauthorized status", () => {
+	it("keeps the HTTP status", () => {
 		const unauthorized = new ModelsHttpError(401, "Unauthorized", "nope");
-		const forbidden = new ModelsHttpError(403, "Forbidden", "");
-		expect(isUnauthorizedModelsError(unauthorized)).toBe(true);
-		expect(isUnauthorizedModelsError(forbidden)).toBe(false);
-		expect(isUnauthorizedModelsError(new Error("401"))).toBe(false);
+		expect(unauthorized.status).toBe(401);
 		expect(unauthorized.message).toContain("401");
 	});
 });

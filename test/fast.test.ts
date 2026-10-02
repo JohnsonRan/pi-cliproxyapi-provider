@@ -133,8 +133,8 @@ describe("Fast catalog mapping", () => {
 		);
 
 		try {
-			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key");
-			expect(loaded.models.map((entry) => [entry.id, entry.cpa?.fast ?? false])).toEqual([
+			const models = await loadMappedModels("http://127.0.0.1:8317", "test-key");
+			expect(models.map((entry) => [entry.id, entry.cpa?.fast ?? false])).toEqual([
 				["gpt-5.4", true],
 				["gpt-5.5", true],
 				["speed-tier-only", false],
@@ -172,8 +172,8 @@ describe("Fast catalog mapping", () => {
 		});
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
 		try {
-			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key", { agentDir });
-			expect(loaded.models[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
+			const models = await loadMappedModels("http://127.0.0.1:8317", "test-key", { agentDir });
+			expect(models[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
 		} finally {
 			fetchMock.mockRestore();
 			rmSync(agentDir, { recursive: true, force: true });

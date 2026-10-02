@@ -336,13 +336,13 @@ function registerProvider(
 				await publish(fresh.models);
 				return;
 			}
-			const loaded = await loadMappedModels(connection.baseUrl, connection.apiKey, {
+			const models = await loadMappedModels(connection.baseUrl, connection.apiKey, {
 				agentDir,
 				signal: context.signal,
 				useMaxContextWindow: useMaxContextWindow(agentDir),
 			});
 			if (context.signal.aborted) return;
-			await publish(bindModels(loaded.models, inferenceBaseUrl));
+			await publish(bindModels(models, inferenceBaseUrl));
 		},
 		stream,
 		streamSimple,
@@ -367,13 +367,13 @@ function registerProvider(
 		const connection = credentialConnection(credential);
 		if (!connection) return;
 		try {
-			const loaded = await loadMappedModels(connection.baseUrl, connection.apiKey, {
+			const models = await loadMappedModels(connection.baseUrl, connection.apiKey, {
 				agentDir,
 				signal: AbortSignal.timeout(STARTUP_CATALOG_TIMEOUT_MS),
 				useMaxContextWindow: useMaxContextWindow(agentDir),
 			});
 			const baseUrl = resolveEndpoints(connection.baseUrl).inferenceBaseUrl;
-			startup = { baseUrl, models: bindModels(loaded.models, baseUrl), at: Date.now() };
+			startup = { baseUrl, models: bindModels(models, baseUrl), at: Date.now() };
 			setModels(startup.models);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

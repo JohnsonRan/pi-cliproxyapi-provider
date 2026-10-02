@@ -3,7 +3,6 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 // Local shape matching pi ThinkingLevelMap; avoid hard runtime peer imports here.
@@ -137,11 +136,6 @@ export interface CpaCapabilities {
 	webSearch?: true;
 	/** `prefer_websockets: false` (non-Codex backends). */
 	sse?: true;
-}
-
-export interface MappedModels {
-	models: PiProviderModel[];
-	modelsUrl: string;
 }
 
 interface ModelsDevCostPayload {
@@ -494,7 +488,7 @@ export function toPiModel(
 	};
 }
 
-/** HTTP error from /v1/models (used to detect 401). */
+/** HTTP error from /v1/models. */
 export class ModelsHttpError extends Error {
 	readonly status: number;
 	readonly statusText: string;
@@ -505,10 +499,6 @@ export class ModelsHttpError extends Error {
 		this.status = status;
 		this.statusText = statusText;
 	}
-}
-
-export function isUnauthorizedModelsError(error: unknown): boolean {
-	return error instanceof ModelsHttpError && error.status === 401;
 }
 
 export async function fetchCodexModels(
@@ -739,13 +729,6 @@ interface ModelsDevCacheFile {
 	providers: Record<string, unknown>;
 }
 
-function getModelsDevCachePath(agentDir?: string): string {
-	if (agentDir?.trim()) {
-		return join(agentDir, "tmp", "models-dev-cache.json");
-	}
-	return join(tmpdir(), "pi-cliproxyapi-models-dev-cache.json");
-}
-
 function readModelsDevCacheFile(cachePath: string): ModelsDevCacheFile | null {
 	try {
 		const raw = readFileSync(cachePath, "utf8");
@@ -797,15 +780,11 @@ function buildCatalogFromProviders(providers: Record<string, unknown>): ModelsDe
 	return catalog;
 }
 
-export async function fetchModelsDevCostMap(
-	agentDir?: string,
-	forceRefresh = false,
-	signal?: AbortSignal,
-): Promise<ModelsDevCostCatalog> {
-	const cachePath = getModelsDevCachePath(agentDir);
+export async function fetchModelsDevCostMap(agentDir: string, signal?: AbortSignal): Promise<ModelsDevCostCatalog> {
+	const cachePath = join(agentDir, "tmp", "models-dev-cache.json");
 	const cached = readModelsDevCacheFile(cachePath);
 
-	if (!forceRefresh && cached && Date.now() - cached.timestamp < MODELS_DEV_CACHE_TTL_MS) {
+	if (cached && Date.now() - cached.timestamp < MODELS_DEV_CACHE_TTL_MS) {
 		return buildCatalogFromProviders(cached.providers);
 	}
 
@@ -848,17 +827,13 @@ export async function loadMappedModels(
 	baseUrlInput: string,
 	apiKey: string,
 	options: { agentDir?: string; signal?: AbortSignal; useMaxContextWindow?: boolean } = {},
-): Promise<MappedModels> {
-	const endpoints = resolveEndpoints(baseUrlInput);
+): Promise<PiProviderModel[]> {
 	const [remoteModels, costCatalog] = await Promise.all([
-		fetchCodexModels(endpoints.modelsUrl, apiKey, MODELS_REQUEST_TIMEOUT_MS, options.signal),
-		options.agentDir ? fetchModelsDevCostMap(options.agentDir, false, options.signal) : Promise.resolve(undefined),
+		fetchCodexModels(resolveEndpoints(baseUrlInput).modelsUrl, apiKey, MODELS_REQUEST_TIMEOUT_MS, options.signal),
+		options.agentDir ? fetchModelsDevCostMap(options.agentDir, options.signal) : Promise.resolve(undefined),
 	]);
 	// Empty catalog is valid: credentials passed (HTTP 200), just no usable models yet.
-	return {
-		models: remoteModels
-			.map((model) => toPiModel(model, costCatalog, options.useMaxContextWindow))
-			.filter((model): model is PiProviderModel => model !== null),
-		modelsUrl: endpoints.modelsUrl,
-	};
+	return remoteModels
+		.map((model) => toPiModel(model, costCatalog, options.useMaxContextWindow))
+		.filter((model): model is PiProviderModel => model !== null);
 }

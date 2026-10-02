@@ -139,8 +139,8 @@ describe("models request helpers", () => {
 				{ slug: "hidden", visibility: "hide", cpa_capabilities: { web_search: true } },
 			]),
 		);
-		const loaded = await loadMappedModels("http://127.0.0.1:8317", "key");
-		expect(loaded.models.map((model) => [model.id, model.cpa])).toEqual([
+		const models = await loadMappedModels("http://127.0.0.1:8317", "key");
+		expect(models.map((model) => [model.id, model.cpa])).toEqual([
 			["search", { webSearch: true }],
 			["no", undefined],
 			["malformed", undefined],

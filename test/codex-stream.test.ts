@@ -13,11 +13,12 @@ import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CLIPROXYAPI_CODEX_API,
+	type CliproxyCodexStreamSimple,
 	createSyntheticCodexAccountId,
 	createSyntheticCodexJwt,
 	loadCliproxyCodexStreams,
 	withCliproxyCodexAuth,
-	wrapStreamSimpleForCliproxyAuth,
+	wrapStreamForCliproxyAuth,
 } from "../extensions/codex-stream.ts";
 import { SessionHierarchy } from "../extensions/session.ts";
 
@@ -178,8 +179,8 @@ describe("CLIProxyAPI Codex authentication", () => {
 
 	it("adapts auth at the stream boundary", () => {
 		let captured: SimpleStreamOptions | undefined;
-		const streamResult = {} as ReturnType<Parameters<typeof wrapStreamSimpleForCliproxyAuth>[0]>;
-		const wrapped = wrapStreamSimpleForCliproxyAuth((_model, _context, options) => {
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const wrapped = wrapStreamForCliproxyAuth<SimpleStreamOptions>((_model, _context, options) => {
 			captured = options;
 			return streamResult;
 		});

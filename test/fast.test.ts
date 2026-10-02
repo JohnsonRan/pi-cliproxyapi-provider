@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Api, Model, OpenAICodexResponsesOptions, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
@@ -10,8 +10,7 @@ import {
 	type CliproxyCodexStreamSimple,
 	resolveCliproxyTransport,
 	toFastCodexOptions,
-	wrapCodexStreamForTransport,
-	wrapStreamSimpleForTransport,
+	wrapStreamForTransport,
 } from "../extensions/codex-stream.ts";
 import { FastModeController } from "../extensions/fast.ts";
 import { loadMappedModels } from "../extensions/lib.ts";
@@ -201,7 +200,7 @@ describe("Codex transport selection", () => {
 	it("applies the resolved transport while preserving other options", () => {
 		let captured: SimpleStreamOptions | undefined;
 		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const wrapped = wrapStreamSimpleForTransport(
+		const wrapped = wrapStreamForTransport<SimpleStreamOptions>(
 			(_model, _context, options) => {
 				captured = options;
 				return streamResult;
@@ -216,7 +215,7 @@ describe("Codex transport selection", () => {
 	it("preserves API-specific options on the full stream contract", () => {
 		let captured: unknown;
 		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const wrapped = wrapCodexStreamForTransport(
+		const wrapped = wrapStreamForTransport<OpenAICodexResponsesOptions>(
 			(_model, _context, options) => {
 				captured = options;
 				return streamResult;

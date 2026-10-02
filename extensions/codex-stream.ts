@@ -23,7 +23,7 @@ import {
 	type SimpleStreamOptions,
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
-import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { mergeSessionHeaders } from "./session.ts";
 import type { WebSocketRecovery } from "./ws-recovery.ts";
 
@@ -121,45 +121,18 @@ export function toFastCodexOptions(model: Model<Api>, options?: SimpleStreamOpti
 	};
 }
 
-function wrapStreamForCliproxyAuth<TOptions extends StreamOptions>(
+export function wrapStreamForCliproxyAuth<TOptions extends StreamOptions>(
 	stream: CliproxyCodexStreamFunction<TOptions>,
 ): CliproxyCodexStreamFunction<TOptions> {
 	return (model, context, streamOptions) => stream(model, context, withCliproxyCodexAuth(streamOptions));
 }
 
-export function wrapStreamSimpleForCliproxyAuth(streamSimple: CliproxyCodexStreamSimple): CliproxyCodexStreamSimple {
-	return wrapStreamForCliproxyAuth(streamSimple);
-}
-
-export function wrapCodexStreamForCliproxyAuth(stream: CliproxyCodexStream): CliproxyCodexStream {
-	return wrapStreamForCliproxyAuth(
-		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
-	) as CliproxyCodexStream;
-}
-
-function wrapStreamForTransport<TOptions extends StreamOptions>(
+export function wrapStreamForTransport<TOptions extends StreamOptions>(
 	stream: CliproxyCodexStreamFunction<TOptions>,
 	transport: TransportChoice,
 ): CliproxyCodexStreamFunction<TOptions> {
 	return (model, context, streamOptions) =>
 		stream(model, context, { ...streamOptions, transport: transport(model, streamOptions) } as TOptions);
-}
-
-export function wrapStreamSimpleForTransport(
-	streamSimple: CliproxyCodexStreamSimple,
-	transport: TransportChoice,
-): CliproxyCodexStreamSimple {
-	return wrapStreamForTransport(streamSimple, transport);
-}
-
-export function wrapCodexStreamForTransport(
-	stream: CliproxyCodexStream,
-	transport: TransportChoice,
-): CliproxyCodexStream {
-	return wrapStreamForTransport(
-		stream as CliproxyCodexStreamFunction<ProviderStreamOptions>,
-		transport,
-	) as CliproxyCodexStream;
 }
 
 /**
@@ -227,8 +200,18 @@ function wrapStreamForSession<TOptions extends StreamOptions>(
 	};
 }
 
+/**
+ * Pi's built-in `openai-codex` provider carries the stock Codex Responses streams. Taking them
+ * from `providers/all` avoids `@earendil-works/pi-ai/compat`, which Pi marks as temporary.
+ */
+function stockCodexStreams(): Pick<Provider, "stream" | "streamSimple"> {
+	const provider = builtinProviders().find((candidate) => candidate.id === "openai-codex");
+	if (!provider) throw new Error("Pi's built-in openai-codex provider is unavailable");
+	return provider;
+}
+
 export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {}): CliproxyCodexStreams {
-	const stock = openAICodexResponsesApi();
+	const stock = stockCodexStreams();
 	const transport: TransportChoice = (model, streamOptions) =>
 		resolveCliproxyTransport(streamOptions, options.prefersSse?.(model) ?? false);
 	const useFast = (model: Model<Api>): boolean => options.shouldUseFast?.(model) ?? false;
@@ -246,9 +229,11 @@ export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {
 		),
 		options.getSessionHeaders,
 	) as CliproxyCodexStream;
-	const simple = wrapStreamSimpleForTransport(wrapStreamSimpleForCliproxyAuth(stockStreamSimple), transport);
-	const full = wrapCodexStreamForTransport(wrapCodexStreamForCliproxyAuth(stockStream), transport);
-	const fullStream = full as CliproxyCodexStreamFunction<OpenAICodexResponsesOptions>;
+	const simple = wrapStreamForTransport(wrapStreamForCliproxyAuth(stockStreamSimple), transport);
+	const fullStream = wrapStreamForTransport(
+		wrapStreamForCliproxyAuth(stockStream as CliproxyCodexStreamFunction<OpenAICodexResponsesOptions>),
+		transport,
+	);
 
 	return {
 		api: CLIPROXYAPI_CODEX_API,

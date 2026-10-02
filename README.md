@@ -230,7 +230,7 @@ Use `/continue` to clear the pause:
 /continue
 ```
 
-Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every CLIProxyAPI request (other providers are not held), the extension rereads this setting. While paused and a CLIProxyAPI model is selected, the footer status line shows an orange `paused`. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
+Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every CLIProxyAPI request (other providers are not held), the extension rereads this setting. While paused and a CLIProxyAPI model is selected, the footer status line shows an orange `paused`. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed.
 
 ## Model catalog
 
@@ -298,7 +298,8 @@ If you previously maintained a static provider such as `cpa-responses` in `~/.pi
 The package also registers `extensions/tps.ts`, which only activates for the primary interactive TUI session (`ctx.hasUI && ctx.mode === "tui"`):
 
 - While the agent is running, the footer shows `Elapsed …` (updates every second).
-- When the agent settles, the footer keeps the final elapsed time plus TPS (e.g. `Elapsed 12s · TPS 45.3 tok/s`) and a notification reports approximate TPS plus token usage (`out` / `in` / cache r/w / total).
+- When the agent settles, the footer keeps the final elapsed time plus TPS (e.g. `Elapsed 12s · TPS 45.3 tok/s`) and a notification reports TPS plus token usage (`out` / `in` / cache r/w / total).
+- TPS divides output tokens by the time assistant responses spent streaming (from each response's first event to its end). Tool runs and gaps between turns count toward Elapsed but not TPS.
 - Subagent and print-mode sessions do not own the timer, clear the parent footer, or emit TPS toasts.
 
 Disable just this helper via `pi config` if you only want the CLIProxyAPI provider.

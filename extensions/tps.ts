@@ -32,6 +32,9 @@ export default function (pi: ExtensionAPI) {
 	let cacheRead = 0;
 	let cacheWrite = 0;
 	let totalTokens = 0;
+	/** Time spent streaming assistant responses, excluding tool runs and gaps between turns. */
+	let streamingMs = 0;
+	let messageStartMs: number | null = null;
 
 	function clearRefreshTimer(): void {
 		if (refreshTimer === undefined) return;
@@ -119,10 +122,23 @@ export default function (pi: ExtensionAPI) {
 		cacheRead = 0;
 		cacheWrite = 0;
 		totalTokens = 0;
+		streamingMs = 0;
+		messageStartMs = null;
 		refreshStatus();
 
 		clearRefreshTimer();
 		refreshTimer = setInterval(() => refreshStatus(), REFRESH_INTERVAL_MS);
+	});
+
+	pi.on("message_start", (event, ctx) => {
+		if (requestStartMs === null || !isPrimaryUiSession(ctx) || !isAssistantMessage(event.message)) return;
+		messageStartMs = Date.now();
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		if (messageStartMs === null || !isPrimaryUiSession(ctx) || !isAssistantMessage(event.message)) return;
+		streamingMs += Date.now() - messageStartMs;
+		messageStartMs = null;
 	});
 
 	pi.on("agent_end", (event, ctx) => {
@@ -152,7 +168,7 @@ export default function (pi: ExtensionAPI) {
 		requestStartMs = null;
 		clearRefreshTimer();
 
-		const tps = output > 0 && elapsedMs > 0 ? (output / elapsedSecondsExact).toFixed(1) : "--";
+		const tps = output > 0 && streamingMs > 0 ? (output / (streamingMs / 1000)).toFixed(1) : "--";
 
 		// Keep the final total time (and TPS when known) in the footer after the run settles.
 		setElapsedStatus(ctx, elapsedSecondsFloor, tps === "--" ? "" : ` · TPS ${tps} tok/s`);
@@ -160,7 +176,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (elapsedMs <= 0) return;
 
-		const message = `TPS ${tps} tok/s. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSecondsExact.toFixed(1)}s`;
+		const message = `TPS ${tps} tok/s over ${(streamingMs / 1000).toFixed(1)}s streaming. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSecondsExact.toFixed(1)}s`;
 		ctx.ui.notify(message, "info");
 	});
 
@@ -168,6 +184,7 @@ export default function (pi: ExtensionAPI) {
 		clearRefreshTimer();
 		clearStatus(ctx);
 		requestStartMs = null;
+		messageStartMs = null;
 		pausedDurationAtStartMs = 0;
 		pauseWasEnabledAtStart = false;
 		statusCtx = null;

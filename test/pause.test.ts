@@ -210,11 +210,19 @@ describe("Elapsed timer", () => {
 
 		tpsExtension(pi);
 		await handlers.get("before_agent_start")?.({}, ctx);
-		await vi.advanceTimersByTimeAsync(4000);
 		const usage = { input: 10, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
-		await handlers.get("agent_end")?.({ messages: [{ role: "assistant", usage }] }, ctx);
+		const message = { role: "assistant", usage };
+		await vi.advanceTimersByTimeAsync(1000);
+		await handlers.get("message_start")?.({ message }, ctx);
+		await vi.advanceTimersByTimeAsync(2000);
+		await handlers.get("message_end")?.({ message }, ctx);
+		// Tool runs and other non-streaming time count toward Elapsed but not TPS.
+		await handlers.get("message_start")?.({ message: { role: "user" } }, ctx);
+		await vi.advanceTimersByTimeAsync(1000);
+		await handlers.get("message_end")?.({ message: { role: "user" } }, ctx);
+		await handlers.get("agent_end")?.({ messages: [message] }, ctx);
 		await handlers.get("agent_settled")?.({}, ctx);
-		expect(setStatus).toHaveBeenLastCalledWith("tps", "Elapsed 4s · TPS 25.0 tok/s");
+		expect(setStatus).toHaveBeenLastCalledWith("tps", "Elapsed 4s · TPS 50.0 tok/s");
 	});
 
 	it("ignores late agent events after session shutdown", async () => {

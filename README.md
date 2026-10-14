@@ -28,6 +28,7 @@ Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex cl
 8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
 9. Leaves compaction triggering to Pi, including native checks between tool turns. After compaction, closes the reused Codex WebSocket for that session so CLIProxyAPI's server-side context resets with the compacted client messages. The extension does not inject synthetic context-overflow errors or block summary requests.
 10. Optionally registers CPA image models listed in `imageModels` for Pi image generation.
+11. Registers CPA decision models (TypeSafe System One, such as Jev) as Pi classifier models.
 
 ## Install
 
@@ -220,6 +221,14 @@ CPA serves image models through `{root}/v1/images/generations` and `{root}/v1/im
 ```
 
 They are registered as Pi image models under this provider and use the same credential. Like Pi's other image models, they do not appear in `/model`; codemode scripts reach them with `models.getAvailableOfType("image")` and `models.generateImages()`, and extensions with `ctx.modelRegistry.generateImages()`. A request with only text calls `generations`; a request with input images calls `edits` with them as `data:` URLs. Images come back as base64 (`response_format: "b64_json"`). Image costs are reported as zero. Changes to `imageModels` apply after `/reload`.
+
+## Decision models (classifiers)
+
+CPA builds that list model capabilities in `{root}/v1/models` (OpenRouter-style `architecture.output_modalities`; [JohnsonRan/CLIProxyAPI](https://github.com/JohnsonRan/CLIProxyAPI) `patch/model-capabilities`) mark System One models with `decisions`. Mark them in CPA with `systemone: true`. Each one is registered as a Pi classifier model under this provider with Pi's `typesafe-system-one` API, so `models.getAvailableOfType("classifier")` and `models.classify()` reach them with the same credential at `{root}/v1/systemone`. They do not appear in `/model`.
+
+The classifier's `contextWindow` is CPA's `context_length`. Callers size their state by it, so set `max-context-length` on the CPA model to the real upstream input limit; without it the extension assumes 32,000 tokens. A CPA without capability fields registers no classifiers, and a failed list keeps the previously known ones.
+
+For example, [pi-llm-as-jev](https://github.com/xz-dev/pi-llm-as-jev) can use `"classifierModel": "cliproxyapi/typesafe/jev"` without `classifierBaseUrl` or a separate TypeSafe key.
 
 ## Session hierarchy
 

@@ -182,10 +182,12 @@ export function firstNonEmpty(...values: Array<string | undefined | null>): stri
  * - /backend-api kept as-is for inference
  * - /v1 rewritten to /backend-api for inference
  * - models always at {root}/v1/models?client_version=cpa
+ * - plain model list (with capability `architecture`) at {root}/v1/models
  */
 export function resolveEndpoints(baseUrlInput: string): {
 	inferenceBaseUrl: string;
 	modelsUrl: string;
+	listUrl: string;
 } {
 	let raw = baseUrlInput.trim();
 	if (!raw) {
@@ -211,9 +213,10 @@ export function resolveEndpoints(baseUrlInput: string): {
 	const rootPath = path.replace(/\/backend-api$/, "");
 	const inferenceBaseUrl = `${url.origin}${path}/`;
 	const modelsPath = `${rootPath}/v1/models`.replace(/\/{2,}/g, "/");
-	const modelsUrl = `${url.origin}${modelsPath}?client_version=${encodeURIComponent(CLIENT_VERSION)}`;
+	const listUrl = `${url.origin}${modelsPath}`;
+	const modelsUrl = `${listUrl}?client_version=${encodeURIComponent(CLIENT_VERSION)}`;
 
-	return { inferenceBaseUrl, modelsUrl };
+	return { inferenceBaseUrl, modelsUrl, listUrl };
 }
 
 export function loadConfigFile(agentDir: string): CliproxyConfigFile {

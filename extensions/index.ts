@@ -23,6 +23,8 @@ import {
 	type Api,
 	type ApiKeyCredential,
 	type AuthInteraction,
+	type ClassifierApi,
+	type ClassifierModel,
 	isModelType,
 	type Model,
 	type Provider,
@@ -34,6 +36,7 @@ import {
 	readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
 import { CompactionController } from "./auto-compact.ts";
+import { createClassify, loadClassifierModels, storedClassifierModels } from "./classifiers.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
 	type CliproxyCodexStream,
@@ -168,13 +171,38 @@ function registerProvider(
 			baseUrl: inferenceBaseUrl,
 		}));
 	let currentModels: readonly Model<Api>[] = [];
-	const setModels = (models: readonly Model<Api>[]): void => {
+	let currentClassifiers: readonly ClassifierModel<ClassifierApi>[] = [];
+	const setModels = (models: readonly Model<Api>[], classifiers: readonly ClassifierModel<ClassifierApi>[]): void => {
 		currentModels = models;
+		currentClassifiers = classifiers;
 		setModelCapabilities(fastMode, capabilities, models);
+	};
+	/** Chat catalog plus decision models; `classifiers` is undefined when only the decision list failed. */
+	const loadCatalog = async (
+		baseUrl: string,
+		apiKey: string,
+		signal: AbortSignal,
+	): Promise<{ models: Model<Api>[]; classifiers?: readonly ClassifierModel<ClassifierApi>[] }> => {
+		const [models, classifiers] = await Promise.all([
+			loadMappedModels(baseUrl, apiKey, { agentDir, signal, useMaxContextWindow: useMaxContextWindow(agentDir) }),
+			loadClassifierModels(baseUrl, apiKey, providerId, signal).catch((error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				logWarn(`failed to load decision models (${message}); keeping known decision models`);
+				return undefined;
+			}),
+		]);
+		return { models: bindModels(models, resolveEndpoints(baseUrl).inferenceBaseUrl), classifiers };
 	};
 	let pendingConfigCleanup: ApiKeyCredential | undefined;
 	/** Catalog fetched while the factory ran, before Pi's first refresh. */
-	let startup: { baseUrl: string; models: Model<Api>[]; at: number } | undefined;
+	let startup:
+		| {
+				baseUrl: string;
+				models: Model<Api>[];
+				classifiers?: readonly ClassifierModel<ClassifierApi>[];
+				at: number;
+		  }
+		| undefined;
 
 	const credentialConnection = (credential?: ApiKeyCredential) => {
 		let file = {} as ReturnType<typeof loadConfigFile>;
@@ -301,8 +329,9 @@ function registerProvider(
 			},
 		},
 		getModels: () => currentModels,
-		getAllModels: () => [...currentModels, ...imageModels],
+		getAllModels: () => [...currentModels, ...currentClassifiers, ...imageModels],
 		generateImages,
+		classify: createClassify(),
 		refreshModels: async (context) => {
 			const credential = context.credential?.type === "api_key" ? context.credential : undefined;
 			cleanupMigratedConfigCredentials(credential);
@@ -313,36 +342,40 @@ function registerProvider(
 				(model): model is Model<Api> =>
 					isModelType(model, "chat") && model.provider === providerId && model.baseUrl === inferenceBaseUrl,
 			);
+			const storedClassifiers = storedClassifierModels(context.stored?.models ?? [], providerId, inferenceBaseUrl);
 			const fresh = startup?.baseUrl === inferenceBaseUrl ? startup : undefined;
-			const publish = async (models: Model<Api>[]): Promise<void> => {
+			const publish = async (
+				models: Model<Api>[],
+				fetchedClassifiers: readonly ClassifierModel<ClassifierApi>[] | undefined,
+			): Promise<void> => {
+				const classifiers = fetchedClassifiers ?? storedClassifiers;
 				// ponytail: an empty 200 never clobbers a populated catalog. Delete this provider's
 				// models-store.json entry to accept a proxy that really has no models.
 				if (models.length === 0 && stored.length > 0) {
 					logWarn(`ignored empty model catalog; keeping ${stored.length} stored models`);
 					return;
 				}
-				await context.publish({ persist: { models, checkedAt: Date.now() }, update: () => setModels(models) });
+				await context.publish({
+					persist: { models: [...models, ...classifiers], checkedAt: Date.now() },
+					update: () => setModels(models, classifiers),
+				});
 			};
 
 			if (!context.allowNetwork) {
 				// Offline phase: prefer this process's startup fetch, else Pi's stored catalog for this proxy.
-				if (fresh) await publish(fresh.models);
-				else await context.publish({ update: () => setModels(stored) });
+				if (fresh) await publish(fresh.models, fresh.classifiers);
+				else await context.publish({ update: () => setModels(stored, storedClassifiers) });
 				return;
 			}
 			// The first network phase consumes the startup fetch; afterwards Pi's store is current.
 			startup = undefined;
 			if (fresh && !context.force && Date.now() - fresh.at < STARTUP_CATALOG_REUSE_MS) {
-				await publish(fresh.models);
+				await publish(fresh.models, fresh.classifiers);
 				return;
 			}
-			const models = await loadMappedModels(connection.baseUrl, connection.apiKey, {
-				agentDir,
-				signal: context.signal,
-				useMaxContextWindow: useMaxContextWindow(agentDir),
-			});
+			const catalog = await loadCatalog(connection.baseUrl, connection.apiKey, context.signal);
 			if (context.signal.aborted) return;
-			await publish(bindModels(models, inferenceBaseUrl));
+			await publish(catalog.models, catalog.classifiers);
 		},
 		stream,
 		streamSimple,
@@ -367,14 +400,14 @@ function registerProvider(
 		const connection = credentialConnection(credential);
 		if (!connection) return;
 		try {
-			const models = await loadMappedModels(connection.baseUrl, connection.apiKey, {
-				agentDir,
-				signal: AbortSignal.timeout(STARTUP_CATALOG_TIMEOUT_MS),
-				useMaxContextWindow: useMaxContextWindow(agentDir),
-			});
+			const catalog = await loadCatalog(
+				connection.baseUrl,
+				connection.apiKey,
+				AbortSignal.timeout(STARTUP_CATALOG_TIMEOUT_MS),
+			);
 			const baseUrl = resolveEndpoints(connection.baseUrl).inferenceBaseUrl;
-			startup = { baseUrl, models: bindModels(models, baseUrl), at: Date.now() };
-			setModels(startup.models);
+			startup = { baseUrl, ...catalog, at: Date.now() };
+			setModels(startup.models, startup.classifiers ?? []);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			logWarn(`failed to load models at startup (${message}); using Pi's stored catalog if available.`);

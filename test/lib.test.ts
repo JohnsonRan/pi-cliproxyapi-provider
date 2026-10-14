@@ -93,6 +93,7 @@ describe("resolveEndpoints", () => {
 		expect(result).toEqual({
 			inferenceBaseUrl: "http://127.0.0.1:8317/backend-api/",
 			modelsUrl: "http://127.0.0.1:8317/v1/models?client_version=cpa",
+			listUrl: "http://127.0.0.1:8317/v1/models",
 		});
 	});
 

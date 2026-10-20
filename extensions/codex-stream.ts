@@ -23,9 +23,12 @@ import {
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { responsesBaseUrl } from "./lib.ts";
 import { mergeSessionHeaders } from "./session.ts";
 
 export const CLIPROXYAPI_CODEX_API = "openai-codex-responses" as const;
+/** Standard Responses API used for models CPA serves from non-Codex backends. */
+export const CLIPROXYAPI_RESPONSES_API = "openai-responses" as const;
 
 const CODEX_ACCOUNT_CLAIM = "https://api.openai.com/auth";
 const SYNTHETIC_JWT_HEADER = { alg: "none", typ: "JWT" } as const;
@@ -177,14 +180,22 @@ function wrapStreamForSession<TOptions extends StreamOptions>(
  * Pi's built-in `openai-codex` provider carries the stock Codex Responses streams. Taking them
  * from `providers/all` avoids `@earendil-works/pi-ai/compat`, which Pi marks as temporary.
  */
-function stockCodexStreams(): Pick<Provider, "stream" | "streamSimple"> {
-	const provider = builtinProviders().find((candidate) => candidate.id === "openai-codex");
-	if (!provider) throw new Error("Pi's built-in openai-codex provider is unavailable");
+function stockStreams(providerId: string): Pick<Provider, "stream" | "streamSimple"> {
+	const provider = builtinProviders().find((candidate) => candidate.id === providerId);
+	if (!provider) throw new Error(`Pi's built-in ${providerId} provider is unavailable`);
 	return provider;
 }
 
+/** Responses models keep the Codex inference base URL; the standard API lives at `{root}/v1`. */
+function wrapStreamForResponsesBaseUrl<TOptions extends StreamOptions>(
+	stream: CliproxyCodexStreamFunction<TOptions>,
+): CliproxyCodexStreamFunction<TOptions> {
+	return (model, context, options) => stream({ ...model, baseUrl: responsesBaseUrl(model.baseUrl) }, context, options);
+}
+
 export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {}): CliproxyCodexStreams {
-	const stock = stockCodexStreams();
+	const stock = stockStreams("openai-codex");
+	const responses = stockStreams("openai");
 	const transport: TransportChoice = (_model, streamOptions) => resolveCliproxyTransport(streamOptions);
 	const useFast = (model: Model<Api>): boolean => options.shouldUseFast?.(model) ?? false;
 	const stockStreamSimple = wrapStreamForSession(
@@ -200,20 +211,35 @@ export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {
 		wrapStreamForCliproxyAuth(stockStream as CliproxyCodexStreamFunction<OpenAICodexResponsesOptions>),
 		transport,
 	);
+	// Non-Codex backends: plain Bearer key on the standard Responses API, no Codex auth or Fast.
+	const responsesFor = <TOptions extends StreamOptions>(stream: CliproxyCodexStreamFunction<TOptions>) =>
+		wrapStreamForTransport(
+			wrapStreamForResponsesBaseUrl(
+				wrapStreamForSession(wrapStreamForEmptyMessages(stream), options.getSessionHeaders),
+			),
+			transport,
+		);
+	const responsesSimple = responsesFor(responses.streamSimple as CliproxyCodexStreamSimple);
+	const responsesStream = responsesFor(responses.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>);
+	const isResponses = (model: Model<Api>): boolean => model.api === CLIPROXYAPI_RESPONSES_API;
 
 	return {
 		api: CLIPROXYAPI_CODEX_API,
 		streamSimple: (model, context, streamOptions) =>
-			useFast(model)
-				? fullStream(model, context, toFastCodexOptions(model, streamOptions))
-				: simple(model, context, streamOptions),
+			isResponses(model)
+				? responsesSimple(model, context, streamOptions)
+				: useFast(model)
+					? fullStream(model, context, toFastCodexOptions(model, streamOptions))
+					: simple(model, context, streamOptions),
 		stream: ((model, context, streamOptions) =>
-			fullStream(
-				model,
-				context,
-				useFast(model)
-					? { ...streamOptions, serviceTier: streamOptions?.serviceTier ?? PRIORITY_SERVICE_TIER }
-					: streamOptions,
-			)) as CliproxyCodexStream,
+			isResponses(model)
+				? responsesStream(model, context, streamOptions as ProviderStreamOptions)
+				: fullStream(
+						model,
+						context,
+						useFast(model)
+							? { ...streamOptions, serviceTier: streamOptions?.serviceTier ?? PRIORITY_SERVICE_TIER }
+							: streamOptions,
+					)) as CliproxyCodexStream,
 	};
 }

@@ -27,6 +27,7 @@ import {
 	resolveIdentity,
 	resolveUseMaxContextWindow,
 	resolveWebSearchDefault,
+	responsesBaseUrl,
 	saveConfigFile,
 	supportsFastServiceTier,
 	toPiModel,
@@ -84,6 +85,13 @@ describe("resolveConnectionSources", () => {
 			baseUrlInput: DEFAULT_BASE_URL,
 			apiKey: "file-key",
 		});
+	});
+});
+
+describe("responsesBaseUrl", () => {
+	it("maps the Codex inference base URL to the standard Responses root", () => {
+		expect(responsesBaseUrl("http://127.0.0.1:8317/backend-api/")).toBe("http://127.0.0.1:8317/v1");
+		expect(responsesBaseUrl("https://proxy.example/cpa/backend-api/")).toBe("https://proxy.example/cpa/v1");
 	});
 });
 

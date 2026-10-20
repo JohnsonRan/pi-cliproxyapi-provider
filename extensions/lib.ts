@@ -86,6 +86,7 @@ export interface CodexClientModel {
 	service_tiers?: Array<CodexServiceTier | string>;
 	additional_speed_tiers?: string[];
 	apply_patch_tool_type?: string;
+	prefer_websockets?: boolean;
 	visibility?: string;
 	cpa_capabilities?: { web_search?: boolean };
 }
@@ -123,6 +124,7 @@ export interface PiProviderModel {
 	thinkingLevelMap?: ThinkingLevelMap;
 	compat?: {
 		supportsOpenAIGrammarTools?: boolean;
+		supportsResponseCheckpoints?: boolean;
 	};
 	/** CPA catalog capabilities; stored with the model so Pi's catalog store restores them offline. */
 	cpa?: CpaCapabilities;
@@ -133,6 +135,12 @@ export interface CpaCapabilities {
 	fast?: true;
 	/** Explicit `cpa_capabilities.web_search: true`. */
 	webSearch?: true;
+	/**
+	 * Served by a non-Codex backend (CPA sets `prefer_websockets: false` exactly then).
+	 * Such models use the standard Responses API, whose durable checkpoints let Pi
+	 * continue with `previous_response_id` across WebSockets via CPA's response cache.
+	 */
+	responses?: true;
 }
 
 interface ModelsDevCostPayload {
@@ -214,6 +222,15 @@ export function resolveEndpoints(baseUrlInput: string): {
 	const modelsUrl = `${listUrl}?client_version=${encodeURIComponent(CLIENT_VERSION)}`;
 
 	return { inferenceBaseUrl, modelsUrl, listUrl };
+}
+
+/**
+ * Standard Responses base URL (`{root}/v1`) for an inference base URL. Models keep the
+ * Codex inference base URL so auth overrides and catalog matching stay uniform; the
+ * Responses stream maps it here per request.
+ */
+export function responsesBaseUrl(inferenceBaseUrl: string): string {
+	return inferenceBaseUrl.replace(/\/backend-api\/?$/, "/v1");
 }
 
 export function loadConfigFile(agentDir: string): CliproxyConfigFile {
@@ -432,6 +449,7 @@ function cpaCapabilities(model: CodexClientModel): CpaCapabilities | undefined {
 	const cpa: CpaCapabilities = {};
 	if (supportsFastServiceTier(model)) cpa.fast = true;
 	if (model.cpa_capabilities?.web_search === true) cpa.webSearch = true;
+	if (model.prefer_websockets === false) cpa.responses = true;
 	return Object.keys(cpa).length > 0 ? cpa : undefined;
 }
 
@@ -470,8 +488,11 @@ export function toPiModel(
 		(costCatalog ? matchModelMaxTokens(id, costCatalog) : undefined) ??
 		DEFAULT_MAX_TOKENS;
 	const cost = costCatalog ? matchModelCost(id, costCatalog) : { ...ZERO_COST };
-	const compat = model.apply_patch_tool_type === "freeform" ? { supportsOpenAIGrammarTools: true } : undefined;
 	const cpa = cpaCapabilities(model);
+	const compat = {
+		...(model.apply_patch_tool_type === "freeform" ? { supportsOpenAIGrammarTools: true } : {}),
+		...(cpa?.responses ? { supportsResponseCheckpoints: true } : {}),
+	};
 
 	return {
 		id,
@@ -482,7 +503,7 @@ export function toPiModel(
 		contextWindow,
 		maxTokens,
 		thinkingLevelMap: buildThinkingLevelMap(efforts),
-		...(compat ? { compat } : {}),
+		...(Object.keys(compat).length > 0 ? { compat } : {}),
 		...(cpa ? { cpa } : {}),
 	};
 }

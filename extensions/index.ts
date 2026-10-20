@@ -39,6 +39,7 @@ import { CompactionController } from "./auto-compact.ts";
 import { createClassify, loadClassifierModels, storedClassifierModels } from "./classifiers.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
+	CLIPROXYAPI_RESPONSES_API,
 	type CliproxyCodexStream,
 	type CliproxyCodexStreamSimple,
 	loadCliproxyCodexStreams,
@@ -164,7 +165,7 @@ function registerProvider(
 		entries.map((model) => ({
 			...model,
 			provider: providerId,
-			api: CLIPROXYAPI_CODEX_API,
+			api: model.cpa?.responses ? CLIPROXYAPI_RESPONSES_API : CLIPROXYAPI_CODEX_API,
 			baseUrl: inferenceBaseUrl,
 		}));
 	let currentModels: readonly Model<Api>[] = [];

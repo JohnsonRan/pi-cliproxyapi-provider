@@ -144,9 +144,12 @@ describe("models request helpers", () => {
 			["search", { webSearch: true }],
 			["no", undefined],
 			["malformed", undefined],
-			["claude", undefined],
+			["claude", { responses: true }],
 			["codex", { fast: true }],
 		]);
+		const compatOf = (id: string) => models.find((model) => model.id === id)?.compat;
+		expect(compatOf("claude")).toEqual({ supportsResponseCheckpoints: true });
+		expect(compatOf("codex")).toBeUndefined();
 	});
 });
 

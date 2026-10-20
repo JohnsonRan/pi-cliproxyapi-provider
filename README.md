@@ -7,14 +7,14 @@ Pi provider extension that discovers models from [CLIProxyAPI](https://github.co
 Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider), this fork:
 
 - uses Pi's native API-key login and stores credentials only in `auth.json`;
-- standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
-- uses Pi's public stock `openai-codex-responses` stream without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
+- routes Codex-backed models through CLIProxyAPI's Codex client endpoint and every other model through its standard Responses API, deciding by the catalog's `prefer_websockets` flag rather than by model name;
+- uses Pi's public stock `openai-codex-responses` and `openai-responses` streams without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
 - passes Pi's `transport` setting through unchanged, so Pi's default `auto` owns WebSocket-first transport and SSE fallback for every model;
 - drops empty user/assistant messages (for example extension fold markers) before the request, because CPA forwards them to backends such as Claude or Gemini that reject empty content;
 - resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
 - keeps the model catalog in Pi's native model store and refresh lifecycle, and improves catalog mapping with opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
 
-Pi supports mixed-API providers, but CLIProxyAPI already translates its Codex client protocol to the configured backend. Keeping one client protocol avoids unreliable origin inference and preserves the Codex-specific WebSocket, compaction, Fast, and tool behavior used by this extension.
+Codex-backed models keep the Codex client protocol, which preserves the Codex-specific WebSocket, compaction, Fast, and tool behavior. Models CPA serves from other backends (Claude, Gemini, …) use the standard Responses API at `{root}/v1` with a plain Bearer key; see [Transport](#transport).
 
 ## What it does
 
@@ -144,7 +144,11 @@ CLIProxyAPI requests follow Pi's own `transport` setting (`~/.pi/agent/settings.
 
 `CLIPROXYAPI_TRANSPORT` and the `transport` field in `cliproxyapi.json` are no longer read; a startup warning points to Pi's setting if either is still present.
 
-Pi's stock Codex transport behavior applies; see Pi's settings docs for how `auto` falls back to SSE and when it retries WebSocket. Use `sse` to disable WebSocket.
+Pi's stock transport behavior applies; see Pi's settings docs for how `auto` falls back to SSE and when it retries WebSocket. Use `sse` to disable WebSocket.
+
+Models the CPA catalog marks `prefer_websockets: false` (every non-Codex backend) use Pi's `openai-responses` API against `{root}/v1/responses` and declare `compat.supportsResponseCheckpoints: true`. Pi then requests `store: true` and continues later turns with `previous_response_id` plus only the new input, which CLIProxyAPI expands from its own response cache (in-memory, 30 minutes) — so a continuation survives a new WebSocket or a Pi restart within that window. An expired or unknown id returns `previous_response_not_found`; Pi resends the full history once and cools checkpoints down. Codex-backed models keep Pi's connection-local continuation on the reused Codex WebSocket. Fast and the native search tool remain Codex-only.
+
+Known limit: Pi captures a checkpoint only when the server's terminal `function_call` output is byte-identical to Pi's own encoding. CLIProxyAPI returns Claude's tool arguments with Claude's original JSON spacing, so turns ending in a tool call currently do not checkpoint and the next cross-socket request sends full history. A fix is pending in Pi (`xz-dev/pi`, `patch/responses-websocket-transport`); no extension change is needed once it lands.
 
 ### baseUrl normalization
 

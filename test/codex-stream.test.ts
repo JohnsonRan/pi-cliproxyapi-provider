@@ -13,6 +13,7 @@ import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CLIPROXYAPI_CODEX_API,
+	CLIPROXYAPI_RESPONSES_API,
 	type CliproxyCodexStreamSimple,
 	createSyntheticCodexAccountId,
 	createSyntheticCodexJwt,
@@ -308,6 +309,56 @@ describe("Pi stock Codex streams", () => {
 			expect(observedPayload).toMatchObject({ service_tier: "priority" });
 			// Pi's stock Codex stream applies priority pricing (2x) when Fast requests the tier.
 			expect(result.usage.cost.input).toBeCloseTo((2 * 5) / 1_000_000, 12);
+		} finally {
+			await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+		}
+	});
+
+	it("sends non-Codex models to the standard Responses API with a plain key", async () => {
+		let requestUrl: string | undefined;
+		let requestHeaders: IncomingHttpHeaders | undefined;
+		const server = createServer((request, response) => {
+			requestUrl = request.url;
+			requestHeaders = request.headers;
+			request.resume();
+			request.on("end", () => {
+				response.writeHead(200, { "Content-Type": "text/event-stream", Connection: "close" });
+				response.end(`data: ${JSON.stringify(completedEvent("msg_claude"))}\n\n`);
+			});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+		try {
+			const address = server.address() as AddressInfo;
+			const model = {
+				...createModel(`http://127.0.0.1:${address.port}/backend-api/`),
+				id: "claude-opus-5-5",
+				api: CLIPROXYAPI_RESPONSES_API,
+			} as unknown as Model<typeof CLIPROXYAPI_CODEX_API>;
+			const streams = loadCliproxyCodexStreams({
+				shouldUseFast: () => true,
+				getSessionHeaders: (options) => new SessionHierarchy().headers(options),
+			});
+			const result = await streams
+				.streamSimple(
+					model,
+					{ messages: [userMessage("hello"), userMessage("")] },
+					{
+						apiKey: REAL_API_KEY,
+						transport: "sse",
+						sessionId: "responses-child",
+						metadata: { parent_session_id: "responses-parent" },
+					},
+				)
+				.result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(result.api).toBe("openai-responses");
+			expect(requestUrl).toBe("/v1/responses");
+			expect(requestHeaders?.authorization).toBe(`Bearer ${REAL_API_KEY}`);
+			expect(requestHeaders?.["x-api-key"]).toBeUndefined();
+			expect(requestHeaders?.["chatgpt-account-id"]).toBeUndefined();
+			expect(requestHeaders?.["x-codex-parent-thread-id"]).toBe("responses-parent");
 		} finally {
 			await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 		}

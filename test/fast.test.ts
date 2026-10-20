@@ -182,19 +182,15 @@ describe("Fast catalog mapping", () => {
 });
 
 describe("Codex transport selection", () => {
-	it("honors an explicit Pi transport setting", () => {
-		expect(resolveCliproxyTransport({ transport: "websocket-cached" }, true)).toBe("websocket-cached");
-		expect(resolveCliproxyTransport({ transport: "sse" }, false)).toBe("sse");
-	});
-
-	it("uses the catalog preference for Pi's default auto transport", () => {
-		expect(resolveCliproxyTransport({ transport: "auto" }, false)).toBe("websocket");
-		expect(resolveCliproxyTransport({ transport: "auto" }, true)).toBe("sse");
-		expect(resolveCliproxyTransport(undefined, false)).toBe("websocket");
+	it("passes Pi's transport setting through unchanged", () => {
+		expect(resolveCliproxyTransport({ transport: "websocket-cached" })).toBe("websocket-cached");
+		expect(resolveCliproxyTransport({ transport: "sse" })).toBe("sse");
+		expect(resolveCliproxyTransport({ transport: "auto" })).toBe("auto");
+		expect(resolveCliproxyTransport(undefined)).toBe("auto");
 	});
 
 	it("uses SSE for standalone no-cache requests", () => {
-		expect(resolveCliproxyTransport({ cacheRetention: "none", transport: "websocket" }, false)).toBe("sse");
+		expect(resolveCliproxyTransport({ cacheRetention: "none", transport: "websocket" })).toBe("sse");
 	});
 
 	it("applies the resolved transport while preserving other options", () => {
@@ -205,11 +201,11 @@ describe("Codex transport selection", () => {
 				captured = options;
 				return streamResult;
 			},
-			(target, options) => resolveCliproxyTransport(options, target.id === "claude-backed"),
+			(_target, options) => resolveCliproxyTransport(options),
 		);
 
 		expect(wrapped({ ...model, id: "claude-backed" }, { messages: [] }, { timeoutMs: 1234 })).toBe(streamResult);
-		expect(captured).toEqual({ timeoutMs: 1234, transport: "sse" });
+		expect(captured).toEqual({ timeoutMs: 1234, transport: "auto" });
 	});
 
 	it("preserves API-specific options on the full stream contract", () => {

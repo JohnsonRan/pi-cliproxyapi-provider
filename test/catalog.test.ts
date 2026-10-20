@@ -144,7 +144,7 @@ describe("models request helpers", () => {
 			["search", { webSearch: true }],
 			["no", undefined],
 			["malformed", undefined],
-			["claude", { sse: true }],
+			["claude", undefined],
 			["codex", { fast: true }],
 		]);
 	});

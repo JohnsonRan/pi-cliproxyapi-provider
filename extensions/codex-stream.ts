@@ -13,7 +13,6 @@ import {
 	type AssistantMessageEventStream,
 	type Context,
 	clampThinkingLevel,
-	lazyStream,
 	type Message,
 	type Model,
 	type OpenAICodexResponsesOptions,
@@ -25,7 +24,6 @@ import {
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { mergeSessionHeaders } from "./session.ts";
-import type { WebSocketRecovery } from "./ws-recovery.ts";
 
 export const CLIPROXYAPI_CODEX_API = "openai-codex-responses" as const;
 
@@ -50,10 +48,6 @@ export type CliproxyCodexStreams = {
 export interface CliproxyCodexStreamOptions {
 	shouldUseFast?: (model: Model<Api>) => boolean;
 	getSessionHeaders?: (options?: StreamOptions) => ProviderHeaders;
-	/** Catalog says prefer_websockets=false for this model. */
-	prefersSse?: (model: Model<Api>) => boolean;
-	/** Lifts Pi's per-session SSE fallback after WebSocket failures, when the host allows it. */
-	webSocketRecovery?: WebSocketRecovery;
 }
 
 type Transport = NonNullable<StreamOptions["transport"]>;
@@ -96,14 +90,13 @@ export function withCliproxyCodexAuth<TOptions extends StreamOptions>(options?: 
 }
 
 /**
- * Pi's global `transport` setting wins unless it is the default `auto`; then the
- * CPA catalog decides (persistent WebSocket, or SSE for prefer_websockets=false).
+ * Pi's `transport` setting passes through unchanged; its default `auto` lets Pi's stock
+ * Codex stream try WebSocket first and own SSE fallback and recovery.
  * One-off no-cache requests always use SSE.
  */
-export function resolveCliproxyTransport(options: StreamOptions | undefined, prefersSse: boolean): Transport {
+export function resolveCliproxyTransport(options: StreamOptions | undefined): Transport {
 	if (options?.cacheRetention === "none") return "sse";
-	if (options?.transport && options.transport !== "auto") return options.transport;
-	return prefersSse ? "sse" : "websocket";
+	return options?.transport ?? "auto";
 }
 
 /**
@@ -161,26 +154,6 @@ function wrapStreamForEmptyMessages<TOptions extends StreamOptions>(
 		stream(model, { ...context, messages: context.messages.filter((message) => !isEmptyMessage(message)) }, options);
 }
 
-function wrapStreamForWebSocketRecovery<TOptions extends StreamOptions>(
-	stream: CliproxyCodexStreamFunction<TOptions>,
-	recovery: WebSocketRecovery | undefined,
-): CliproxyCodexStreamFunction<TOptions> {
-	if (!recovery) return stream;
-	return (model, context, options) => {
-		// Pi keys its WebSocket cache and SSE fallback by sessionId, and skips both without cache retention.
-		const sessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
-		if (!sessionId || options?.transport === "sse") return stream(model, context, options);
-		return lazyStream(model, async () => {
-			try {
-				await recovery.beforeRequest(sessionId);
-			} catch {
-				// Recovery is best-effort; Pi's own transport choice still applies.
-			}
-			return stream(model, context, options);
-		});
-	};
-}
-
 function wrapStreamForSession<TOptions extends StreamOptions>(
 	stream: CliproxyCodexStreamFunction<TOptions>,
 	getHeaders?: CliproxyCodexStreamOptions["getSessionHeaders"],
@@ -212,21 +185,14 @@ function stockCodexStreams(): Pick<Provider, "stream" | "streamSimple"> {
 
 export function loadCliproxyCodexStreams(options: CliproxyCodexStreamOptions = {}): CliproxyCodexStreams {
 	const stock = stockCodexStreams();
-	const transport: TransportChoice = (model, streamOptions) =>
-		resolveCliproxyTransport(streamOptions, options.prefersSse?.(model) ?? false);
+	const transport: TransportChoice = (_model, streamOptions) => resolveCliproxyTransport(streamOptions);
 	const useFast = (model: Model<Api>): boolean => options.shouldUseFast?.(model) ?? false;
 	const stockStreamSimple = wrapStreamForSession(
-		wrapStreamForWebSocketRecovery(
-			wrapStreamForEmptyMessages(stock.streamSimple as CliproxyCodexStreamSimple),
-			options.webSocketRecovery,
-		),
+		wrapStreamForEmptyMessages(stock.streamSimple as CliproxyCodexStreamSimple),
 		options.getSessionHeaders,
 	);
 	const stockStream = wrapStreamForSession(
-		wrapStreamForWebSocketRecovery(
-			wrapStreamForEmptyMessages(stock.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>),
-			options.webSocketRecovery,
-		),
+		wrapStreamForEmptyMessages(stock.stream as CliproxyCodexStreamFunction<ProviderStreamOptions>),
 		options.getSessionHeaders,
 	) as CliproxyCodexStream;
 	const simple = wrapStreamForTransport(wrapStreamForCliproxyAuth(stockStreamSimple), transport);

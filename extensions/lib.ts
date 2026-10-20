@@ -86,7 +86,6 @@ export interface CodexClientModel {
 	service_tiers?: Array<CodexServiceTier | string>;
 	additional_speed_tiers?: string[];
 	apply_patch_tool_type?: string;
-	prefer_websockets?: boolean;
 	visibility?: string;
 	cpa_capabilities?: { web_search?: boolean };
 }
@@ -134,8 +133,6 @@ export interface CpaCapabilities {
 	fast?: true;
 	/** Explicit `cpa_capabilities.web_search: true`. */
 	webSearch?: true;
-	/** `prefer_websockets: false` (non-Codex backends). */
-	sse?: true;
 }
 
 interface ModelsDevCostPayload {
@@ -435,7 +432,6 @@ function cpaCapabilities(model: CodexClientModel): CpaCapabilities | undefined {
 	const cpa: CpaCapabilities = {};
 	if (supportsFastServiceTier(model)) cpa.fast = true;
 	if (model.cpa_capabilities?.web_search === true) cpa.webSearch = true;
-	if (model.prefer_websockets === false) cpa.sse = true;
 	return Object.keys(cpa).length > 0 ? cpa : undefined;
 }
 

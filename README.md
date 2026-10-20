@@ -9,7 +9,7 @@ Compared with [router-for-me/pi-cliproxyapi-provider](https://github.com/router-
 - uses Pi's native API-key login and stores credentials only in `auth.json`;
 - standardizes every discovered model on CLIProxyAPI's Codex client endpoint without inferring a wire protocol from the model name or backend origin;
 - uses Pi's public stock `openai-codex-responses` stream without resolving or rewriting Pi build files, adapting plain CPA authentication at the request boundary;
-- follows Pi's `transport` setting; under Pi's default `auto`, uses persistent WebSocket, or SSE for models the CPA catalog marks `prefer_websockets: false`;
+- passes Pi's `transport` setting through unchanged, so Pi's default `auto` owns WebSocket-first transport and SSE fallback for every model;
 - drops empty user/assistant messages (for example extension fold markers) before the request, because CPA forwards them to backends such as Claude or Gemini that reject empty content;
 - resets the reused Codex WebSocket after compaction so server-side context follows Pi's compacted messages;
 - keeps the model catalog in Pi's native model store and refresh lifecycle, and improves catalog mapping with opt-in maximum context windows, grammar/freeform tools, and output-token metadata resolved from CPA, `models.dev`, or a safe default.
@@ -140,15 +140,11 @@ The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.j
 
 ### Transport
 
-CLIProxyAPI requests follow Pi's own `transport` setting (`~/.pi/agent/settings.json`, see Pi's settings docs). With Pi's default `auto`, the catalog decides per model: persistent `websocket`, or `sse` for models CPA marks `prefer_websockets: false` (CPA does this for non-Codex backends). Setting Pi's `transport` to `websocket`, `websocket-cached`, or `sse` applies that transport to every CLIProxyAPI model. One-off native summary requests (`cacheRetention: "none"`) always use SSE.
+CLIProxyAPI requests follow Pi's own `transport` setting (`~/.pi/agent/settings.json`, see Pi's settings docs). The value is passed to Pi's stock Codex stream unchanged and applies to every CLIProxyAPI model; the catalog's `prefer_websockets` field is ignored. With Pi's default `auto`, Pi tries WebSocket first and owns SSE fallback, cooldown, and recovery. One-off native summary requests (`cacheRetention: "none"`) always use SSE.
 
 `CLIPROXYAPI_TRANSPORT` and the `transport` field in `cliproxyapi.json` are no longer read; a startup warning points to Pi's setting if either is still present.
 
-Pi's stock Codex transport behavior applies: `websocket`, `websocket-cached`, and `auto` may fall back to SSE when WebSocket setup fails before response streaming starts. A failure after events begin is surfaced instead of replaying the request over SSE. Use `sse` to disable WebSocket. Pi currently has no strict WebSocket-only option.
-
-After any WebSocket failure, stock Pi keeps that session on SSE until the session ends. On Pi builds that export `getOpenAICodexWebSocketDebugStatsLazy` and `resetOpenAICodexWebSocketDebugStatsLazy` from `@earendil-works/pi-ai`, this extension lifts that: the first failure is retried on a fresh WebSocket at the next request (the failed socket was discarded, which covers a silently dead cached connection), and further consecutive failures stay on SSE for 5 minutes before WebSocket is tried again. A successful WebSocket request resets the sequence.
-
-Official Pi 1.0.0 does not export these accessors, so it keeps the stock behavior. They are proposed for the [xz-dev/pi](https://github.com/xz-dev/pi) fork in [xz-dev/pi#8](https://github.com/xz-dev/pi/pull/8); recovery activates automatically on a build that includes them, with no configuration.
+Pi's stock Codex transport behavior applies; see Pi's settings docs for how `auto` falls back to SSE and when it retries WebSocket. Use `sse` to disable WebSocket.
 
 ### baseUrl normalization
 

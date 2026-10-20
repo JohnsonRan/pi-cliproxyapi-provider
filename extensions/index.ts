@@ -71,7 +71,6 @@ import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import { registerNativeSearch } from "./search.ts";
 import { SessionHierarchy } from "./session.ts";
 import { ProviderStatusController } from "./status.ts";
-import { hostCodexWebSocketStateAccess, WebSocketRecovery } from "./ws-recovery.ts";
 
 /** Bound on the startup catalog fetch; Pi waits for the extension factory. */
 export const STARTUP_CATALOG_TIMEOUT_MS = 5_000;
@@ -89,7 +88,6 @@ function logInfo(message: string): void {
 /** Catalog-derived per-model capabilities shared by streams, tools, and commands. */
 interface ModelCapabilities {
 	webSearch: Set<string>;
-	sse: Set<string>;
 	/** Called after a catalog update so Fast status reflects new support. */
 	changed?: () => void;
 }
@@ -105,7 +103,6 @@ function setModelCapabilities(
 ): void {
 	fastMode.setSupportedModelIds(capabilityIds(models, "fast"));
 	capabilities.webSearch = new Set(capabilityIds(models, "webSearch"));
-	capabilities.sse = new Set(capabilityIds(models, "sse"));
 	capabilities.changed?.();
 }
 
@@ -580,7 +577,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logWarn(`invalid Fast configuration (${message}); using fast=false`);
 	}
 	const fastMode = new FastModeController(fastEnabled);
-	const capabilities: ModelCapabilities = { webSearch: new Set(), sse: new Set() };
+	const capabilities: ModelCapabilities = { webSearch: new Set() };
 	let webSearchEnabled = false;
 	try {
 		webSearchEnabled = resolveWebSearchDefault(agentDir);
@@ -600,15 +597,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// Config errors are reported where the config is actually used.
 	}
 
-	const webSocketStateAccess = hostCodexWebSocketStateAccess();
 	let stream: CliproxyCodexStream;
 	let streamSimple: CliproxyCodexStreamSimple;
 	try {
 		const streams = loadCliproxyCodexStreams({
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 			getSessionHeaders: (options) => hierarchy.headers(options),
-			prefersSse: (model) => model.provider === identity.providerId && capabilities.sse.has(model.id),
-			webSocketRecovery: webSocketStateAccess && new WebSocketRecovery(webSocketStateAccess),
 		});
 		stream = streams.stream;
 		streamSimple = streams.streamSimple;

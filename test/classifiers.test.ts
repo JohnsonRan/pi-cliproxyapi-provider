@@ -8,6 +8,7 @@ import {
 	classifierBaseUrl,
 	createClassify,
 	DEFAULT_CLASSIFIER_CONTEXT_WINDOW,
+	decisionsApiModels,
 	toClassifierModel,
 } from "../extensions/classifiers.ts";
 import providerExtension from "../extensions/index.ts";
@@ -17,6 +18,7 @@ const ROOT = "http://127.0.0.1:8317";
 const MODELS_URL = `${ROOT}/v1/models?client_version=cpa`;
 const LIST_URL = `${ROOT}/v1/models`;
 const SYSTEMONE_URL = `${ROOT}/v1/systemone`;
+const DECISIONS_URL = `${ROOT}/v1/decisions`;
 const INFERENCE_BASE = `${ROOT}/backend-api/`;
 
 const ENV_NAMES = ["CLIPROXYAPI_API_KEY", "CLIPROXYAPI_BASE_URL", "CLIPROXYAPI_PROVIDER_ID"] as const;
@@ -77,6 +79,7 @@ const LISTED = [
 	{ id: "gpt-5.4", architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] } },
 	{ id: "typesafe/jev", context_length: 24_000, architecture: { output_modalities: ["decisions"] } },
 	{ id: "Qwen/Qwen3-Embedding-4B", architecture: { output_modalities: ["embeddings"] } },
+	{ id: "gpt-6-luna", architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] } },
 ];
 
 /** Serve CPA's Codex catalog, plain list and System One endpoint. */
@@ -91,6 +94,13 @@ function mockCpa(list: () => unknown[] | Error) {
 		}
 		if (url === SYSTEMONE_URL) {
 			return json({ model: "typesafe/jev", answers: { done: { type: "noul", noul: 0.86 } } });
+		}
+		if (url === DECISIONS_URL) {
+			return json({
+				model: "gpt-6-luna",
+				answers: [{ type: "predicate", name: "done", probability: 0.91 }],
+				usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+			});
 		}
 		return new Response("{}");
 	});
@@ -115,6 +125,22 @@ describe("classifier model mapping", () => {
 			INFERENCE_BASE,
 		);
 		expect(unknownLimit?.contextWindow).toBe(DEFAULT_CLASSIFIER_CONTEXT_WINDOW);
+	});
+
+	it("maps listed Decisions API models onto openai-decisions, even when CPA marks them as decision models", () => {
+		const decisions = decisionsApiModels();
+		expect(decisions.map((model) => model.id)).toContain("gpt-6-luna");
+		for (const listed of [LISTED[3]!, { id: "gpt-6-luna", architecture: { output_modalities: ["decisions"] } }]) {
+			expect(toClassifierModel(listed, "cliproxyapi", INFERENCE_BASE, decisions)).toMatchObject({
+				type: "classifier",
+				id: "gpt-6-luna",
+				api: "openai-decisions",
+				provider: "cliproxyapi",
+				baseUrl: INFERENCE_BASE,
+				input: ["text", "image"],
+			});
+		}
+		expect(toClassifierModel(LISTED[3]!, "cliproxyapi", INFERENCE_BASE)).toBeNull();
 	});
 
 	it("derives the CPA /v1 root from the inference base", () => {
@@ -145,10 +171,11 @@ describe("classifier models in Pi", () => {
 
 			expect(runtime.getModels("cliproxyapi").map((model) => model.id)).toEqual(["gpt-5.4"]);
 			const classifiers = await runtime.getAvailableOfType("classifier", "cliproxyapi");
-			expect(classifiers.map((model) => model.id)).toEqual(["typesafe/jev"]);
+			expect(classifiers.map((model) => model.id)).toEqual(["typesafe/jev", "gpt-6-luna"]);
 			expect((await store.read("cliproxyapi"))?.models.map((model) => model.id)).toEqual([
 				"gpt-5.4",
 				"typesafe/jev",
+				"gpt-6-luna",
 			]);
 
 			const result = await runtime.classify(classifiers[0]!, {
@@ -168,6 +195,33 @@ describe("classifier models in Pi", () => {
 		});
 	});
 
+	it("classifies Decisions API models through CPA /v1/decisions", async () => {
+		await withAgentDir(async (agentDir) => {
+			const fetchMock = mockCpa(() => LISTED);
+			const runtime = await startPi(new InMemoryModelsStore(), agentDir);
+			await runtime.refresh({ allowNetwork: false });
+			const luna = (await runtime.getAvailableOfType("classifier", "cliproxyapi")).find(
+				(m) => m.id === "gpt-6-luna",
+			);
+			expect(luna?.api).toBe("openai-decisions");
+
+			const result = await runtime.classify(luna!, {
+				state: { task: "fix bug", tests: "pass" },
+				questions: {
+					done: { type: "bool", instructions: "Is the task complete?", criteria: { true: "yes", false: "no" } },
+				},
+			});
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.answers.done).toEqual({ type: "bool", probability: 0.91 });
+
+			const call = fetchMock.mock.calls.find(([url]) => String(url) === DECISIONS_URL);
+			expect(call).toBeDefined();
+			const init = call![1] as RequestInit;
+			expect(new Headers(init.headers).get("authorization")).toBe("Bearer key");
+			expect(JSON.parse(String(init.body))).toMatchObject({ model: "gpt-6-luna" });
+		});
+	});
+
 	it("keeps stored classifiers when only the plain model list fails", async () => {
 		await withAgentDir(async (agentDir) => {
 			let list: unknown[] | Error = LISTED;
@@ -177,6 +231,7 @@ describe("classifier models in Pi", () => {
 			await first.refresh({ allowNetwork: false });
 			expect((await first.getAvailableOfType("classifier", "cliproxyapi")).map((m) => m.id)).toEqual([
 				"typesafe/jev",
+				"gpt-6-luna",
 			]);
 
 			list = new Error("list down");
@@ -185,6 +240,7 @@ describe("classifier models in Pi", () => {
 			expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("failed to load decision models"));
 			expect((await first.getAvailableOfType("classifier", "cliproxyapi")).map((m) => m.id)).toEqual([
 				"typesafe/jev",
+				"gpt-6-luna",
 			]);
 			expect((await store.read("cliproxyapi"))?.models.map((model) => model.id)).toContain("typesafe/jev");
 		});

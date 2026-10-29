@@ -4,8 +4,10 @@
  * CPA's plain `/v1/models` list declares OpenRouter-style
  * `architecture.output_modalities`; entries whose outputs include `decisions`
  * are System One models served at `{root}/v1/systemone`. They are registered
- * with Pi's `typesafe-system-one` API, and requests go through the stock
- * implementation from Pi's built-in `typesafe` provider.
+ * with Pi's `typesafe-system-one` API. Listed models that Pi's built-in `openai`
+ * provider serves through the Decisions API (`gpt-6-luna`) are also registered,
+ * with `openai-decisions`, at `{root}/v1/decisions`. Requests go through the
+ * stock implementation from the matching built-in provider.
  */
 
 import {
@@ -48,13 +50,34 @@ export function isDecisionModel(model: ListedModel): boolean {
 	return hasModality(model.architecture?.output_modalities, DECISIONS_MODALITY);
 }
 
+/** Built-in provider whose stock implementation serves each classifier API. */
+const STOCK_PROVIDERS: Partial<Record<ClassifierApi, string>> = {
+	"typesafe-system-one": "typesafe",
+	"openai-decisions": "openai",
+};
+
+/** Pi's built-in OpenAI Decisions API models, the only models `/v1/decisions` accepts. */
+export function decisionsApiModels(): ClassifierModel<ClassifierApi>[] {
+	const openai = builtinProviders().find((candidate) => candidate.id === "openai");
+	return (openai?.getAllModels?.() ?? []).filter(
+		(model): model is ClassifierModel<ClassifierApi> =>
+			isModelType(model as ClassifierModel<ClassifierApi>, "classifier") &&
+			(model as ClassifierModel<ClassifierApi>).api === "openai-decisions",
+	);
+}
+
 export function toClassifierModel(
 	model: ListedModel,
 	provider: ProviderId,
 	baseUrl: string,
-): ClassifierModel<typeof CLIPROXYAPI_CLASSIFIER_API> | null {
+	decisionsModels: readonly ClassifierModel<ClassifierApi>[] = [],
+): ClassifierModel<ClassifierApi> | null {
 	const id = String(model.id ?? "").trim();
-	if (!id || !isDecisionModel(model)) return null;
+	if (!id) return null;
+	// Checked first: a Decisions API model stays on that API even if CPA marks it as a decision model.
+	const decisions = decisionsModels.find((candidate) => candidate.id === id);
+	if (decisions) return { ...decisions, provider, baseUrl };
+	if (!isDecisionModel(model)) return null;
 	const input: Array<"text" | "image"> = hasModality(model.architecture?.input_modalities, "image")
 		? ["text", "image"]
 		: ["text"];
@@ -95,13 +118,14 @@ export async function loadClassifierModels(
 	apiKey: string,
 	provider: ProviderId,
 	signal?: AbortSignal,
-): Promise<ClassifierModel<typeof CLIPROXYAPI_CLASSIFIER_API>[]> {
+): Promise<ClassifierModel<ClassifierApi>[]> {
 	const { listUrl, inferenceBaseUrl } = resolveEndpoints(baseUrlInput);
 	const timeout = AbortSignal.timeout(MODELS_REQUEST_TIMEOUT_MS);
 	const listed = await fetchListedModels(listUrl, apiKey, signal ? AbortSignal.any([signal, timeout]) : timeout);
+	const decisionsModels = decisionsApiModels();
 	return listed
-		.map((model) => toClassifierModel(model, provider, inferenceBaseUrl))
-		.filter((model): model is ClassifierModel<typeof CLIPROXYAPI_CLASSIFIER_API> => model !== null);
+		.map((model) => toClassifierModel(model, provider, inferenceBaseUrl, decisionsModels))
+		.filter((model): model is ClassifierModel<ClassifierApi> => model !== null);
 }
 
 /** Narrow a stored catalog to this provider's classifier models for the given endpoint. */
@@ -118,7 +142,10 @@ export function storedClassifierModels(
 	);
 }
 
-/** `baseUrl` is the inference base `{root}/backend-api/`; System One lives at `{root}/v1/systemone`. */
+/**
+ * `baseUrl` is the inference base `{root}/backend-api/`; System One lives at
+ * `{root}/v1/systemone` and the Decisions API at `{root}/v1/decisions`.
+ */
 export function classifierBaseUrl(baseUrl: string): string {
 	return new URL("../v1/", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
 }
@@ -130,18 +157,24 @@ type Classify = (
 ) => Promise<ClassifierResult>;
 
 /**
- * Classify through Pi's stock System One implementation. `Models` rewrites the
- * model's base URL to the provider auth's inference base before dispatch, so the
- * CPA `/v1` root is derived here. Never rejects, like provider `classify`.
+ * Classify through the stock implementation for the model's API (System One from
+ * `typesafe`, Decisions from `openai`). `Models` rewrites the model's base URL to
+ * the provider auth's inference base before dispatch, so the CPA `/v1` root is
+ * derived here. Never rejects, like provider `classify`. `stockClassify` replaces
+ * every stock implementation (tests).
  */
 export function createClassify(stockClassify?: Classify): Classify {
-	let stock = stockClassify;
+	const stocks = new Map<string, Classify>();
 	return async (model, context, options) => {
 		try {
+			let stock = stockClassify ?? stocks.get(model.api);
 			if (!stock) {
-				const provider = builtinProviders().find((candidate) => candidate.id === "typesafe");
-				if (!provider?.classify) throw new Error("Pi's built-in typesafe classifier is unavailable");
+				const id = STOCK_PROVIDERS[model.api];
+				if (!id) throw new Error(`Unsupported classifier API: ${model.api}`);
+				const provider = builtinProviders().find((candidate) => candidate.id === id);
+				if (!provider?.classify) throw new Error(`Pi's built-in ${id} classifier is unavailable`);
 				stock = provider.classify.bind(provider);
+				stocks.set(model.api, stock);
 			}
 			return await stock({ ...model, baseUrl: classifierBaseUrl(model.baseUrl) }, context, options);
 		} catch (error) {
